@@ -39,6 +39,6 @@ autoload -Uz vcs_info
 precmd() { vcs_info }
 
 setopt prompt_subst
-PROMPT='%F{cyan}%n@%m%f %F{yellow}%~%f %F{green}${vcs_info_msg_0_}%f %# '
+PROMPT='%F{cyan}%n@%m%f %F{green}${vcs_info_msg_0_}%f %# '
 zstyle ':vcs_info:git:*' formats '(%b)'
 
