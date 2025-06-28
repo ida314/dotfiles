@@ -1,44 +1,57 @@
-# If you come from bash you might have to change your $PATH.
-# export PATH=$HOME/bin:$HOME/.local/bin:/usr/local/bin:$PATH
-#
+# Enable Powerlevel10k instant prompt. Should stay close to the top of ~/.zshrc.
+# Initialization code that may require console input (password prompts, [y/n]
+# confirmations, etc.) must go above this block; everything else may go below.
+if [[ -r "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh" ]]; then
+  source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
+fi
 
-export PATH=/opt/homebrew/bin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Library/Apple/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin
-export PATH=/opt/homebrew/bin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Library/Apple/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin
-export PATH=/opt/homebrew/bin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Library/Apple/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin
-export PATH="$HOME/.cargo/bin:$PATH"
+# Local paths
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+typeset -U path PATH
 
-export PATH="$HOME/bin:$PATH"
+# Zinit plugins
+ZINIT_HOME="${XDG_DATA_HOME:-${HOME}/.local/share}/zinit/zinit.git"
 
-source ~/.zsh_profile
+# Download zinit
+if [ ! -d "$ZINIT_HOME" ]; then
+	mkdir -p "$(dirname $ZINIT_HOME)"
+	git clone https://github.com/zdharma-continuum/zinit.git "$ZINIT_HOME"
+fi
 
-#vim bindings commandline
-bindkey -v
+# Source zinit
+source "${ZINIT_HOME}/zinit.zsh"
 
-#color for ls and other commands
-export CLICOLOR=1
-export LSCOLORS=GxFxCxDxBxegedabagaced
-alias ls='ls --color=auto'  # For Linux
-# or
-#alias ls='ls -G'            # For macOS
-#
-#
+# add powerlevel10k
+zinit ice depth=1; zinit light romkatv/powerlevel10k
 
+# add zsh plugins
+zinit light zsh-users/zsh-syntax-highlighting
+zinit light zsh-users/zsh-completions
+zinit light zsh-users/zsh-autosuggestions
 
-alias config='/usr/bin/git --git-dir=$HOME/.cfg/ --work-tree=$HOME'
+# load completions
+autoload -U compinit && compinit
 
+# To customize prompt, run `p10k configure` or edit ~/.p10k.zsh.
+[[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh
 
+# Keybindings
+bindkey '^[[Z' autosuggest-accept  # shift + tab  | autosuggest
 
+# History
+HISTSIZE=5000
+HISTFILE=~/.zsh_history
+SAVEHIST=$HISTSIZE
+HISTDUP=erase
+setopt appendhistory
+setopt sharehistory
+setopt hist_ignore_space
+setopt hist_ignore_all_dups
+setopt hist_save_no_dups
+setopt hist_find_no_dups
 
-# l = ls -la 
-alias l='ls -G -la'
+# Completion styling
+zstyle ':completion:*' matcher-list 'm:{a-z}={A-Za-z}'
 
-alias vim='nvim'
-
-# git branch tracking
-autoload -Uz vcs_info
-precmd() { vcs_info }
-
-setopt prompt_subst
-PROMPT='%F{cyan}%n@%m%f %F{green}${vcs_info_msg_0_}%f %# '
-zstyle ':vcs_info:git:*' formats '(%b)'
-
+# Shell integrations
+eval "$(zoxide init --cmd cd zsh)"
