@@ -1,0 +1,10 @@
+#!/bin/sh
+# waybar on-click: cycle power-saver -> balanced -> performance -> power-saver
+EP="net.hadess.PowerProfiles /net/hadess/PowerProfiles net.hadess.PowerProfiles ActiveProfile"
+cur=$(busctl get-property $EP | cut -d'"' -f2)
+case "$cur" in
+  power-saver) next=balanced ;;
+  balanced)    next=performance ;;
+  *)           next=power-saver ;;
+esac
+busctl set-property $EP s "$next"

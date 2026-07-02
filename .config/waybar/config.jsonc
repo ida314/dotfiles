@@ -1,0 +1,74 @@
+{
+  "layer": "top",
+  "position": "top",
+  "height": 28,
+  "spacing": 4,
+
+  "modules-left": ["dwl/tags", "dwl/window"],
+  "modules-center": ["clock"],
+  "modules-right": ["tray", "custom/powerprofile", "network", "bluetooth", "pulseaudio", "backlight", "battery"],
+
+  "dwl/tags": {
+    "num-tags": 9
+  },
+  "dwl/window": {
+    "format": "{title}",
+    "max-length": 60
+  },
+
+  "clock": {
+    "format": "{:%a %d %b  %H:%M}",
+    "tooltip-format": "<tt><small>{calendar}</small></tt>"
+  },
+
+  "tray": {
+    "icon-size": 16,
+    "spacing": 8
+  },
+
+  "custom/powerprofile": {
+    "exec": "~/.local/bin/powerprofile-status",
+    "return-type": "json",
+    "interval": 5,
+    "on-click": "~/.local/bin/powerprofile-cycle",
+    "tooltip": true
+  },
+
+  "network": {
+    "format-wifi": " {essid} ({signalStrength}%)",
+    "format-ethernet": " {ipaddr}",
+    "format-disconnected": "睊 offline",
+    "tooltip-format": "{ifname} via {gwaddr}",
+    "on-click": "nm-connection-editor"
+  },
+
+  "bluetooth": {
+    "format": " {status}",
+    "format-connected": " {device_alias}",
+    "on-click": "blueman-manager"
+  },
+
+  "pulseaudio": {
+    "format": "{icon} {volume}%",
+    "format-muted": " muted",
+    "format-icons": { "default": ["", "", ""] },
+    "on-click": "pavucontrol",
+    "on-scroll-up": "wpctl set-volume @DEFAULT_AUDIO_SINK@ 2%+",
+    "on-scroll-down": "wpctl set-volume @DEFAULT_AUDIO_SINK@ 2%-"
+  },
+
+  "backlight": {
+    "format": "{icon} {percent}%",
+    "format-icons": ["", "", ""],
+    "on-scroll-up": "brightnessctl set +5%",
+    "on-scroll-down": "brightnessctl set 5%-"
+  },
+
+  "battery": {
+    "states": { "warning": 30, "critical": 15 },
+    "format": "{icon} {capacity}%",
+    "format-charging": " {capacity}%",
+    "format-icons": ["", "", "", "", ""],
+    "tooltip-format": "{timeTo} ({power}W)"
+  }
+}

@@ -1,0 +1,11 @@
+#!/bin/sh
+# waybar custom module: show current power profile (tuned-ppd via net.hadess.PowerProfiles)
+p=$(busctl get-property net.hadess.PowerProfiles /net/hadess/PowerProfiles \
+      net.hadess.PowerProfiles ActiveProfile | cut -d'"' -f2)
+case "$p" in
+  performance) icon="" ;;
+  balanced)    icon="" ;;
+  power-saver) icon="" ;;
+  *)           icon="?" ;;
+esac
+printf '{"text":"%s","tooltip":"Power profile: %s","class":"%s"}\n' "$icon" "$p" "$p"
