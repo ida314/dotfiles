@@ -1,0 +1,11 @@
+#!/bin/sh
+# Lock screen replacement for dwl (replaces omarchy-system-lock / hyprlock)
+
+if ! pgrep -x swaylock > /dev/null; then
+    swaylock -f &
+fi
+
+# Lock 1password if running
+if pgrep -x "1password" > /dev/null; then
+    1password --lock &
+fi
