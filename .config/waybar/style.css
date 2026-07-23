@@ -26,6 +26,7 @@ window#waybar {
 #clock { font-weight: bold; padding: 0 10px; }
 
 #tray,
+#memory,
 #network,
 #bluetooth,
 #pulseaudio,
@@ -34,6 +35,8 @@ window#waybar {
   padding: 0 10px;
 }
 
+#memory.warning   { color: #e5c07b; }
+#memory.critical  { color: #e06c75; }
 #battery.warning  { color: #e5c07b; }
 #battery.critical { color: #e06c75; }
 #network.disconnected { color: #e06c75; }
