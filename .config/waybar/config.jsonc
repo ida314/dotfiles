@@ -42,23 +42,23 @@
   },
 
   "network": {
-    "format-wifi": " {essid} ({signalStrength}%)",
-    "format-ethernet": " {ipaddr}",
-    "format-disconnected": "睊 offline",
+    "format-wifi": " {essid} ({signalStrength}%)",
+    "format-ethernet": " {ipaddr}",
+    "format-disconnected": "󰖪 offline",
     "tooltip-format": "{ifname} via {gwaddr}",
     "on-click": "nm-connection-editor"
   },
 
   "bluetooth": {
-    "format": " {status}",
-    "format-connected": " {device_alias}",
+    "format": " {status}",
+    "format-connected": " {device_alias}",
     "on-click": "blueman-manager"
   },
 
   "pulseaudio": {
     "format": "{icon} {volume}%",
-    "format-muted": " muted",
-    "format-icons": { "default": ["", "", ""] },
+    "format-muted": "󰝟 muted",
+    "format-icons": { "default": ["", "", ""] },
     "on-click": "pavucontrol",
     "on-scroll-up": "wpctl set-volume @DEFAULT_AUDIO_SINK@ 2%+",
     "on-scroll-down": "wpctl set-volume @DEFAULT_AUDIO_SINK@ 2%-"
@@ -66,7 +66,7 @@
 
   "backlight": {
     "format": "{icon} {percent}%",
-    "format-icons": ["", "", ""],
+    "format-icons": ["󰃝", "󰃟", "󰃠"],
     "on-scroll-up": "brightnessctl set +5%",
     "on-scroll-down": "brightnessctl set 5%-"
   },
