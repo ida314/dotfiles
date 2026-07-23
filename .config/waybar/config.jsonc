@@ -28,7 +28,7 @@
 
   "memory": {
     "interval": 5,
-    "format": " {used:0.1f}G",
+    "format": "󰍛 {used:0.1f}/{total:0.1f}G   {swapUsed:0.1f}G",
     "states": { "warning": 80, "critical": 90 },
     "tooltip-format": "RAM: {used:0.1f}G / {total:0.1f}G ({percentage}%)\nSwap: {swapUsed:0.1f}G / {swapTotal:0.1f}G"
   },
