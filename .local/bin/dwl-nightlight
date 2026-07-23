@@ -1,0 +1,118 @@
+#!/bin/sh
+# Night-light / "redshift" toggle for dwl, with a mako notification.
+# Two backends, auto-selected by which renderer dwl is running:
+#
+#   * Vulkan session  (WLR_RENDERER=vulkan)  -> TRUE per-channel gamma via
+#     gammastep. The Vulkan renderer advertises output_color_transform, so the
+#     gamma-control ramp actually renders (real redshift; blacks stay black).
+#   * GLES2 session   (anything else)        -> translucent amber overlay
+#     (~/.local/bin/nightlight). GLES2 drops color transforms, so this additive
+#     tint is the only thing that shows. Washes blacks slightly -> fallback only.
+#
+# dwl's spawn() inherits WLR_RENDERER (see dwl.c execvp), so this branch is
+# reliable when launched from the Alt+n keybindings.
+#
+# Usage: dwl-nightlight toggle|up|down
+#   toggle  on/off at the last-used setting
+#   up      warmer;  turns it on if off
+#   down    cooler;  turns it off past neutral
+set -eu
+
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}"
+
+notify() { # summary  body  value(0-100)
+	notify-send -a dwl-nightlight -t 1200 \
+		-h string:x-canonical-private-synchronous:nightlight \
+		-h int:value:"$3" "$1" "$2"
+}
+
+# ===================== backend A: true gamma (gammastep) =====================
+G_STATE="$STATE_DIR/dwl-nightlight.temp"
+G_MIN=2500        # warmest allowed
+G_MAX=6500        # neutral == off
+G_STEP=500
+G_DEFAULT=3400    # default night temperature
+
+g_running() { pgrep -x gammastep >/dev/null 2>&1; }
+g_read()    { [ -f "$G_STATE" ] && cat "$G_STATE" || echo "$G_DEFAULT"; }
+# warmth as 0-100% of the 2500..6500 range, for the notification bar
+g_pct()     { awk -v t="$1" -v mn="$G_MIN" -v mx="$G_MAX" \
+		'BEGIN{ p=(mx-t)/(mx-mn)*100; if(p<0)p=0; if(p>100)p=100; printf "%d",p }'; }
+g_start() { # temp -- continuous manual mode, holds the temperature
+	pkill -x gammastep 2>/dev/null || true
+	echo "$1" > "$G_STATE"
+	setsid -f gammastep -m wayland -P -O "$1" >/dev/null 2>&1
+}
+g_stop() { pkill -x gammastep 2>/dev/null || true; }
+
+gamma_backend() {
+	case "${1:-}" in
+	toggle)
+		if g_running; then
+			g_stop; notify "Night light" "Off" 0
+		else
+			t=$(g_read); g_start "$t"; notify "Night light" "${t}K" "$(g_pct "$t")"
+		fi ;;
+	up)   # warmer == lower temperature
+		t=$(awk -v t="$(g_read)" -v s="$G_STEP" -v m="$G_MIN" \
+			'BEGIN{ v=t-s; if(v<m)v=m; printf "%d",v }')
+		g_start "$t"; notify "Night light" "${t}K" "$(g_pct "$t")" ;;
+	down) # cooler == higher temperature; off once neutral
+		t=$(awk -v t="$(g_read)" -v s="$G_STEP" 'BEGIN{ printf "%d", t+s }')
+		if [ "$t" -ge "$G_MAX" ]; then
+			g_stop; echo "$G_DEFAULT" > "$G_STATE"; notify "Night light" "Off" 0
+		else
+			g_start "$t"; notify "Night light" "${t}K" "$(g_pct "$t")"
+		fi ;;
+	*) echo "usage: $0 toggle|up|down" >&2; exit 1 ;;
+	esac
+}
+
+# ======================= backend B: amber overlay (GLES2) ====================
+OVERLAY="$HOME/.local/bin/nightlight"
+O_STATE="$STATE_DIR/dwl-nightlight.alpha"
+O_MATCH='local/bin/nightlight'    # note leading path: never matches this wrapper
+O_MIN=0.10
+O_MAX=0.60
+O_STEP=0.07
+O_DEFAULT=0.30
+
+o_running() { pgrep -f "$O_MATCH" >/dev/null 2>&1; }
+o_read()    { [ -f "$O_STATE" ] && cat "$O_STATE" || echo "$O_DEFAULT"; }
+o_pct()     { awk -v a="$1" -v m="$O_MAX" 'BEGIN{ p=a/m*100; printf "%d",(p>100?100:p) }'; }
+o_start() { # alpha
+	pkill -f "$O_MATCH" 2>/dev/null || true
+	echo "$1" > "$O_STATE"
+	setsid -f "$OVERLAY" "$1" >/dev/null 2>&1
+}
+o_stop() { pkill -f "$O_MATCH" 2>/dev/null || true; }
+
+overlay_backend() {
+	case "${1:-}" in
+	toggle)
+		if o_running; then
+			o_stop; notify "Night light" "Off" 0
+		else
+			a=$(o_read); o_start "$a"; notify "Night light" "On" "$(o_pct "$a")"
+		fi ;;
+	up)
+		a=$(awk -v a="$(o_read)" -v s="$O_STEP" -v m="$O_MAX" \
+			'BEGIN{ v=a+s; if(v>m)v=m; printf "%.2f",v }')
+		o_start "$a"; notify "Night light" "Warmth ${a}" "$(o_pct "$a")" ;;
+	down)
+		a=$(awk -v a="$(o_read)" -v s="$O_STEP" 'BEGIN{ printf "%.2f", a-s }')
+		if awk -v a="$a" -v m="$O_MIN" 'BEGIN{ exit !(a < m) }'; then
+			o_stop; echo "$O_DEFAULT" > "$O_STATE"; notify "Night light" "Off" 0
+		else
+			o_start "$a"; notify "Night light" "Warmth ${a}" "$(o_pct "$a")"
+		fi ;;
+	*) echo "usage: $0 toggle|up|down" >&2; exit 1 ;;
+	esac
+}
+
+# ============================== dispatch =====================================
+if [ "${WLR_RENDERER:-}" = vulkan ] && command -v gammastep >/dev/null 2>&1; then
+	gamma_backend "${1:-}"
+else
+	overlay_backend "${1:-}"
+fi

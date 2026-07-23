@@ -1,0 +1,22 @@
+#!/bin/sh
+# Screenshot tool for dwl with a lightweight mako notification.
+# macOS-style: copies to the clipboard AND saves a timestamped file.
+# Backend: grim + slurp + wl-copy (Wayland). Usage: dwl-screenshot region|full
+set -eu
+
+dir="${XDG_PICTURES_DIR:-$HOME/Pictures}/Screenshots"
+mkdir -p "$dir"
+file="$dir/$(date +%Y-%m-%d_%H-%M-%S).png"
+
+case "${1:-}" in
+	region) geom=$(slurp) || exit 0; grim -g "$geom" "$file" ;;  # Esc in slurp → cancel silently
+	full)   grim "$file" ;;
+	*)      echo "usage: $0 region|full" >&2; exit 1 ;;
+esac
+
+wl-copy < "$file"
+
+notify-send -a dwl-screenshot -t 2000 -i "$file" \
+	-h string:x-canonical-private-synchronous:screenshot \
+	"Screenshot" "Copied to clipboard
+$file"

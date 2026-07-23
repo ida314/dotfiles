@@ -1,0 +1,21 @@
+#!/bin/sh
+# Screen + keyboard backlight control for dwl with a lightweight mako
+# notification. Replaces KDE powerdevil. Backend: brightnessctl (sysfs).
+# Screen device is the Asahi DCP panel backlight (apple-panel-bl).
+# Usage: dwl-brightness up|down|kbd-up|kbd-down
+set -eu
+
+case "${1:-}" in
+	up)       dev=apple-panel-bl; label="Brightness";          tag=brightness; step=5%+  ;;
+	down)     dev=apple-panel-bl; label="Brightness";          tag=brightness; step=5%-  ;;
+	kbd-up)   dev=kbd_backlight;  label="Keyboard backlight";  tag=kbd;        step=10%+ ;;
+	kbd-down) dev=kbd_backlight;  label="Keyboard backlight";  tag=kbd;        step=10%- ;;
+	*)        echo "usage: $0 up|down|kbd-up|kbd-down" >&2; exit 1 ;;
+esac
+
+brightnessctl -d "$dev" set "$step" >/dev/null
+pct=$(brightnessctl -d "$dev" -m i | awk -F, '{print $4}' | tr -d '%')
+
+notify-send -a dwl-brightness -t 1200 \
+	-h string:x-canonical-private-synchronous:"$tag" \
+	-h int:value:"$pct" "$label" "${pct}%"

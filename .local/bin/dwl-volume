@@ -1,0 +1,27 @@
+#!/bin/sh
+# Volume control for dwl with a lightweight mako notification.
+# Replaces KDE plasma-pa. Backend: PipeWire (wpctl), same as under KDE.
+# Usage: dwl-volume up|down|mute
+set -eu
+
+sink=@DEFAULT_AUDIO_SINK@
+
+case "${1:-}" in
+	up)   wpctl set-mute "$sink" 0; wpctl set-volume -l 1.0 "$sink" 5%+ ;;
+	down) wpctl set-mute "$sink" 0; wpctl set-volume -l 1.0 "$sink" 5%- ;;
+	mute) wpctl set-mute "$sink" toggle ;;
+	*)    echo "usage: $0 up|down|mute" >&2; exit 1 ;;
+esac
+
+raw=$(wpctl get-volume "$sink")            # e.g. "Volume: 0.35 [MUTED]"
+pct=$(echo "$raw" | awk '{printf "%d", $2 * 100}')
+
+if echo "$raw" | grep -q MUTED; then
+	notify-send -a dwl-volume -t 1200 \
+		-h string:x-canonical-private-synchronous:volume \
+		-h int:value:0 "Volume" "Muted"
+else
+	notify-send -a dwl-volume -t 1200 \
+		-h string:x-canonical-private-synchronous:volume \
+		-h int:value:"$pct" "Volume" "${pct}%"
+fi
