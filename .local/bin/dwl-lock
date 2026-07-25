@@ -2,7 +2,12 @@
 # Lock screen replacement for dwl (replaces omarchy-system-lock / hyprlock)
 
 if ! pgrep -x gtklock > /dev/null; then
-    gtklock -d &
+    # Run in the FOREGROUND on purpose: with -d, gtklock forks and the parent
+    # blocks until the daemon signals that the session lock is established
+    # (SIGUSR1 from its `locked` handler, 1s timeout). swayidle runs this from
+    # before-sleep with `-w`, so blocking here guarantees the screen is locked
+    # before suspend proceeds — no unlocked flash on resume.
+    gtklock -d
 fi
 
 # Lock 1password if running
