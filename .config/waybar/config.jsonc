@@ -50,7 +50,8 @@
   },
 
   "bluetooth": {
-    "format": " {status}",
+    "format": "",
+    "tooltip-format": "{status}",
     "format-connected": " {device_alias}",
     "on-click": "blueman-manager"
   },
