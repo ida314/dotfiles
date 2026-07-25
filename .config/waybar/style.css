@@ -31,9 +31,13 @@ window#waybar {
 #bluetooth,
 #pulseaudio,
 #backlight,
-#battery {
+#battery,
+#custom-powerprofile,
+#custom-suspend {
   padding: 0 10px;
 }
+
+#custom-suspend.off { color: #e5c07b; }
 
 #memory.warning   { color: #e5c07b; }
 #memory.critical  { color: #e06c75; }

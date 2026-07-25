@@ -6,7 +6,7 @@
 
   "modules-left": ["dwl/tags", "dwl/window"],
   "modules-center": ["clock"],
-  "modules-right": ["tray", "memory", "custom/powerprofile", "network", "bluetooth", "pulseaudio", "backlight", "battery"],
+  "modules-right": ["tray", "memory", "custom/powerprofile", "custom/suspend", "network", "bluetooth", "pulseaudio", "backlight", "battery"],
 
   "dwl/tags": {
     "num-tags": 9
@@ -38,6 +38,15 @@
     "return-type": "json",
     "interval": 5,
     "on-click": "~/.local/bin/powerprofile-cycle",
+    "tooltip": true
+  },
+
+  "custom/suspend": {
+    "exec": "~/.local/bin/dwl-suspend-status",
+    "return-type": "json",
+    "interval": "once",
+    "signal": 8,
+    "on-click": "~/.local/bin/dwl-suspend-toggle",
     "tooltip": true
   },
 

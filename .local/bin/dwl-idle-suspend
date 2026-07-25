@@ -1,0 +1,8 @@
+#!/bin/sh
+# Called by swayidle at the idle-suspend timeout (see ~/.config/dwl/startup.sh).
+# Honors the no-suspend flag set by `dwl-suspend-toggle`, so idle suspend can
+# be turned off without touching swayidle (screen still locks/blanks at the
+# earlier timeout either way).
+
+[ -e "$HOME/.local/state/dwl/no-suspend" ] && exit 0
+exec systemctl suspend

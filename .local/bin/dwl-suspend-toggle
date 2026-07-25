@@ -1,0 +1,23 @@
+#!/bin/sh
+# Toggle idle auto-suspend on/off. Writes the flag file read by
+# dwl-idle-suspend; takes effect immediately, no swayidle restart needed.
+
+FLAG="$HOME/.local/state/dwl/no-suspend"
+mkdir -p "${FLAG%/*}"
+
+if [ -e "$FLAG" ]; then
+    rm -f "$FLAG"
+    msg="Idle suspend ON (10 min)"
+else
+    touch "$FLAG"
+    msg="Idle suspend OFF (screen still locks at 3 min)"
+fi
+
+# Refresh the waybar indicator (custom/suspend listens on RTMIN+8)
+pkill -RTMIN+8 -x waybar 2>/dev/null
+
+if command -v notify-send >/dev/null; then
+    notify-send -t 3000 "dwl" "$msg"
+else
+    echo "$msg"
+fi

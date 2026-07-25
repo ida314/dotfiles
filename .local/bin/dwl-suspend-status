@@ -1,0 +1,8 @@
+#!/bin/sh
+# waybar custom module: show whether idle auto-suspend is enabled
+# (flag file owned by dwl-suspend-toggle, read by dwl-idle-suspend)
+if [ -e "$HOME/.local/state/dwl/no-suspend" ]; then
+    printf '{"text":"󰒳","tooltip":"Idle suspend: off — screen still locks at 3 min","class":"off"}\n'
+else
+    printf '{"text":"󰒲","tooltip":"Idle suspend: on — sleep after 10 min idle","class":"on"}\n'
+fi
