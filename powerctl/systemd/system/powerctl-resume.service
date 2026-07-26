@@ -1,0 +1,12 @@
+[Unit]
+Description=Reapply battery charging rules after resume
+After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+
+[Service]
+Type=oneshot
+# try-restart is a no-op when the rule is off, so the user's choice survives
+# a suspend/resume cycle either way.
+ExecStart=/usr/bin/systemctl try-restart powerctl.service
+
+[Install]
+WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target

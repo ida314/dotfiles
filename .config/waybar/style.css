@@ -33,11 +33,13 @@ window#waybar {
 #backlight,
 #battery,
 #custom-powerprofile,
-#custom-suspend {
+#custom-suspend,
+#custom-chargecap {
   padding: 0 10px;
 }
 
 #custom-suspend.off { color: #e5c07b; }
+#custom-chargecap.on { color: #98c379; }
 
 #memory.warning   { color: #e5c07b; }
 #memory.critical  { color: #e06c75; }

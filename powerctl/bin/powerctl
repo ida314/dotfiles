@@ -1,0 +1,451 @@
+#!/bin/sh
+# powerctl — battery charging and idle power rules.
+#
+# Two halves with very different enforcement:
+#   charging  SMC firmware enforces sysfs thresholds. Stateless writes, no daemon.
+#   idle      swayidle enforces timeouts fixed at launch, so changing them means
+#             regenerating its command line and restarting it.
+#
+# Charging rules need root and live in /etc; idle rules are pure session policy
+# and live in ~/.config. Each config sits in the privilege domain it belongs to.
+
+set -eu
+
+CONF=/etc/powerctl/rules.conf
+IDLE_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/powerctl/idle.conf"
+IDLE_CMD="${XDG_STATE_HOME:-$HOME/.local/state}/powerctl/swayidle-cmd.sh"
+
+PROG=${0##*/}
+
+die()  { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
+warn() { printf '%s: %s\n' "$PROG" "$*" >&2; }
+
+# ---------------------------------------------------------------- discovery
+
+# Locate by capability rather than hardcoding macsmc-battery, so this keeps
+# working if the driver is ever renamed.
+find_battery() {
+    for d in /sys/class/power_supply/*/; do
+        if [ -f "$d/charge_control_end_threshold" ]; then
+            printf '%s' "${d%/}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+find_ac() {
+    for d in /sys/class/power_supply/*/; do
+        if [ -f "$d/online" ] && [ "$(cat "$d/type" 2>/dev/null)" = Mains ]; then
+            printf '%s' "${d%/}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+BAT=$(find_battery) || BAT=
+AC=$(find_ac) || AC=
+
+on_ac() {
+    [ -n "$AC" ] || return 1
+    [ "$(cat "$AC/online" 2>/dev/null || echo 0)" = 1 ]
+}
+
+# ------------------------------------------------------------------- config
+
+# Charging defaults. CAP_STOP is the cap; CAP_START is where charging resumes.
+ACTIVE=none
+CAP_START=75
+CAP_STOP=80
+HEALTH_FLOOR=60
+HEALTH_CEILING=90
+CHEMISTRY=li-ion
+
+# Idle defaults, seconds; 0 means never. These mirror the values that were
+# hardcoded in ~/.config/dwl/startup.sh before powerctl existed.
+IDLE_AC_SCREEN=600
+IDLE_AC_SLEEP=0
+IDLE_BAT_SCREEN=180
+IDLE_BAT_SLEEP=600
+
+# shellcheck source=/dev/null
+[ -r "$CONF" ]      && . "$CONF"
+# shellcheck source=/dev/null
+[ -r "$IDLE_CONF" ] && . "$IDLE_CONF"
+
+need_root() {
+    [ "$(id -u)" = 0 ] && return 0
+    command -v sudo >/dev/null || die "must be root"
+    exec sudo -- "$0" "$@"
+}
+
+# Rewrite a KEY=value line in a config file, appending if absent.
+set_key() { # file key value
+    _f=$1 _k=$2 _v=$3
+    mkdir -p "${_f%/*}"
+    [ -e "$_f" ] || : > "$_f"
+    if grep -qE "^[[:space:]]*$_k=" "$_f"; then
+        sed -i "s|^[[:space:]]*$_k=.*|$_k=$_v|" "$_f"
+    else
+        printf '%s=%s\n' "$_k" "$_v" >> "$_f"
+    fi
+}
+
+# ------------------------------------------------------------------- health
+
+soh() { # state of health, integer percent
+    _f=$(cat "$BAT/charge_full" 2>/dev/null || echo 0)
+    _d=$(cat "$BAT/charge_full_design" 2>/dev/null || echo 0)
+    [ "$_d" -gt 0 ] || return 1
+    echo $(( _f * 100 / _d ))
+}
+
+# Policy, not a computation -- the hardware reports condition, not what to do
+# about it. See docs/powerctl.md. The inversion at low SoH is deliberate: once a
+# pack has lost real capacity, capping the top slice costs more utility than the
+# marginal aging benefit is worth.
+health_target() { # soh -> target percent
+    if   [ "$1" -ge 90 ]; then _t=75
+    elif [ "$1" -ge 80 ]; then _t=80
+    elif [ "$1" -ge 70 ]; then _t=85
+    else                       _t=90
+    fi
+    [ "$_t" -lt "$HEALTH_FLOOR" ]   && _t=$HEALTH_FLOOR
+    [ "$_t" -gt "$HEALTH_CEILING" ] && _t=$HEALTH_CEILING
+    echo "$_t"
+}
+
+# Resolve the active rule to a start/stop pair. Prints "start stop".
+effective_thresholds() {
+    case $ACTIVE in
+        cap)    echo "$CAP_START $CAP_STOP" ;;
+        health)
+            _s=$(soh) || die "cannot read battery health"
+            _t=$(health_target "$_s")
+            _b=$(( _t - 5 )); [ "$_b" -lt 0 ] && _b=0
+            echo "$_b $_t"
+            ;;
+        none|*) echo "100 100" ;;
+    esac
+}
+
+# ---------------------------------------------------------------- appliance
+
+# UPower 1.91 has its own charge limit (readonly 75/80). Harmless while
+# disabled, but it writes the same sysfs files, so make sure it stays off.
+upower_guard() {
+    command -v upower >/dev/null || return 0
+    command -v busctl >/dev/null || return 0
+    _p=$(upower -e 2>/dev/null | grep -m1 battery) || return 0
+    _en=$(busctl get-property org.freedesktop.UPower "$_p" \
+              org.freedesktop.UPower.Device ChargeThresholdEnabled 2>/dev/null |
+          awk '{print $2}')
+    [ "$_en" = "true" ] || return 0
+    if ! busctl call org.freedesktop.UPower "$_p" \
+             org.freedesktop.UPower.Device EnableChargeThreshold b false \
+             >/dev/null 2>&1; then
+        warn "UPower's charge limit is enabled and could not be turned off;" \
+             "it will fight powerctl over the same sysfs files"
+    fi
+}
+
+# The driver rejects start > stop, so pick the write order that keeps every
+# intermediate state valid rather than assuming a direction.
+write_thresholds() { # start stop
+    _ns=$1 _nt=$2
+    _ce=$(cat "$BAT/charge_control_end_threshold")
+    if [ "$_ns" -le "$_ce" ]; then
+        printf '%s\n' "$_ns" > "$BAT/charge_control_start_threshold"
+        printf '%s\n' "$_nt" > "$BAT/charge_control_end_threshold"
+    else
+        printf '%s\n' "$_nt" > "$BAT/charge_control_end_threshold"
+        printf '%s\n' "$_ns" > "$BAT/charge_control_start_threshold"
+    fi
+}
+
+cmd_apply() {
+    [ -n "$BAT" ] || die "no battery with charge-threshold support"
+    need_root apply "$@"
+
+    if [ "${1:-}" = --restore ]; then
+        set -- 100 100
+    else
+        upower_guard
+        # shellcheck disable=SC2046
+        set -- $(effective_thresholds)
+    fi
+
+    write_thresholds "$1" "$2"
+
+    # The driver may silently clamp; report drift rather than assume success.
+    _gs=$(cat "$BAT/charge_control_start_threshold")
+    _ge=$(cat "$BAT/charge_control_end_threshold")
+    if [ "$_gs" != "$1" ] || [ "$_ge" != "$2" ]; then
+        warn "driver clamped thresholds: asked $1/$2, got $_gs/$_ge"
+    fi
+}
+
+# ------------------------------------------------------------------ duration
+
+parse_dur() {
+    case $1 in
+        never|off|none) echo 0 ;;
+        *h) echo $(( ${1%h} * 3600 )) ;;
+        *m) echo $(( ${1%m} * 60 )) ;;
+        *s) echo "${1%s}" ;;
+        *[!0-9]*) die "bad duration: $1 (use 30s, 5m, 1h, never)" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+fmt_dur() {
+    [ "$1" -eq 0 ] && { echo never; return 0; }
+    if   [ $(( $1 % 3600 )) -eq 0 ]; then echo "$(( $1 / 3600 ))h"
+    elif [ $(( $1 % 60 ))   -eq 0 ]; then echo "$(( $1 / 60 ))m"
+    else                                  echo "${1}s"
+    fi
+}
+
+# --------------------------------------------------------------------- idle
+
+# Register the union of all configured timeouts and let the handler decide
+# whether each applies. Restarting swayidle resets its idle counter, so this
+# deliberately avoids needing a restart when the power source changes -- only a
+# config change regenerates this.
+gen_idle_cmd() {
+    mkdir -p "${IDLE_CMD%/*}"
+    {
+        printf '#!/bin/sh\n'
+        printf '# Generated by powerctl -- do not edit. Regenerate: powerctl idle apply\n'
+        printf 'exec swayidle -w \\\n'
+
+        for _spec in "screen $IDLE_AC_SCREEN" "screen $IDLE_BAT_SCREEN" \
+                     "sleep $IDLE_AC_SLEEP"   "sleep $IDLE_BAT_SLEEP"; do
+            # shellcheck disable=SC2086
+            set -- $_spec
+            _kind=$1 _secs=$2
+            [ "$_secs" -gt 0 ] || continue
+            # dedupe: same kind+timeout registered twice would fire twice
+            case " ${_seen:-} " in *" $_kind:$_secs "*) continue ;; esac
+            _seen="${_seen:-} $_kind:$_secs"
+
+            # Single-quoted printf formats: the generated file needs real
+            # backslash-newline continuations, and a double-quoted format here
+            # consumes the escapes one level too early.
+            printf "  timeout %s 'powerctl-idle-action %s %s'" \
+                   "$_secs" "$_kind" "$_secs"
+            if [ "$_kind" = screen ]; then
+                printf ' \\\n'
+                printf '    resume %s' "'wlopm --on \"*\"'"
+            fi
+            printf ' \\\n'
+        done
+
+        printf '  before-sleep %s' "'$HOME/.local/bin/dwl-lock'"
+        printf ' \\\n'
+        printf '  after-resume %s\n' "'wlopm --on \"*\"'"
+    } > "$IDLE_CMD"
+    chmod +x "$IDLE_CMD"
+}
+
+cmd_idle() {
+    case ${1:-show} in
+    show)
+        printf 'idle rules   (live source: %s)\n\n' "$(on_ac && echo AC || echo battery)"
+        printf '  %-10s %-10s %-10s\n' '' 'screen' 'sleep'
+        printf '  %-10s %-10s %-10s\n' 'on AC'   "$(fmt_dur "$IDLE_AC_SCREEN")"  "$(fmt_dur "$IDLE_AC_SLEEP")"
+        printf '  %-10s %-10s %-10s\n' 'battery' "$(fmt_dur "$IDLE_BAT_SCREEN")" "$(fmt_dur "$IDLE_BAT_SLEEP")"
+        if [ -e "$HOME/.local/state/dwl/no-suspend" ]; then
+            printf '\n  override: idle suspend OFF (dwl-suspend-toggle)\n'
+        fi
+        ;;
+    set)
+        [ $# -eq 4 ] || die "usage: $PROG idle set <ac|bat> <screen|sleep> <duration>"
+        case $2 in ac|bat) ;; *) die "expected 'ac' or 'bat', got: $2" ;; esac
+        case $3 in screen|sleep) ;; *) die "expected 'screen' or 'sleep', got: $3" ;; esac
+        _key="IDLE_$(echo "$2" | tr '[:lower:]' '[:upper:]')_$(echo "$3" | tr '[:lower:]' '[:upper:]')"
+        _val=$(parse_dur "$4")
+        set_key "$IDLE_CONF" "$_key" "$_val"
+        cmd_idle apply
+        printf '%s = %s\n' "$_key" "$(fmt_dur "$_val")"
+        ;;
+    apply)
+        gen_idle_cmd
+        systemctl --user restart swayidle.service 2>/dev/null ||
+            warn "could not restart swayidle.service (not installed yet?)"
+        ;;
+    *) die "unknown idle subcommand: $1" ;;
+    esac
+}
+
+# ------------------------------------------------------------------- output
+
+cmd_list() {
+    printf 'charging rules   (active: %s)\n\n' "$ACTIVE"
+    printf '  cap       start %s%%  stop %s%%\n' "$CAP_START" "$CAP_STOP"
+    if _s=$(soh 2>/dev/null); then
+        printf '  health    SoH %s%%  ->  start %s%%  stop %s%%   (floor %s, ceiling %s)\n' \
+            "$_s" "$(( $(health_target "$_s") - 5 ))" "$(health_target "$_s")" \
+            "$HEALTH_FLOOR" "$HEALTH_CEILING"
+    fi
+
+    if [ -n "$BAT" ]; then
+        printf '\n  live      start %s%%  stop %s%%  capacity %s%%  %s\n' \
+            "$(cat "$BAT/charge_control_start_threshold")" \
+            "$(cat "$BAT/charge_control_end_threshold")" \
+            "$(cat "$BAT/capacity")" "$(cat "$BAT/status")"
+        # Configured and live diverging is the main silent failure mode here.
+        # shellcheck disable=SC2046
+        set -- $(effective_thresholds)
+        if [ "$(cat "$BAT/charge_control_start_threshold")" != "$1" ] ||
+           [ "$(cat "$BAT/charge_control_end_threshold")" != "$2" ]; then
+            printf '  WARNING   live values do not match rule (%s/%s) -- run: powerctl apply\n' "$1" "$2"
+        fi
+    fi
+
+    printf '\n'
+    cmd_idle show
+}
+
+# Whether the rule is currently being enforced, as opposed to merely configured.
+# The unit's active state is the on/off switch -- see docs/powerctl.md.
+enforced() { systemctl is-active --quiet powerctl.service 2>/dev/null; }
+
+cmd_status() {
+    if [ "${1:-}" = --waybar ]; then
+        if [ "$ACTIVE" = none ]; then
+            printf '{"text":"","tooltip":"No charging rule set\\nRun: powerctl cap 80","class":"off"}\n'
+        elif ! enforced; then
+            # shellcheck disable=SC2046
+            set -- $(effective_thresholds)
+            printf '{"text":"","tooltip":"Charge rule paused (%s: %s%%/%s%%)\\nClick to resume","class":"off"}\n' \
+                "$ACTIVE" "$1" "$2"
+        else
+            # shellcheck disable=SC2046
+            set -- $(effective_thresholds)
+            printf '{"text":" %s","tooltip":"Charge rule: %s\\nResumes below %s%%, stops at %s%%\\nClick to pause","class":"on"}\n' \
+                "$2" "$ACTIVE" "$1" "$2"
+        fi
+    else
+        # shellcheck disable=SC2046
+        set -- $(effective_thresholds)
+        printf '%s: start %s%% stop %s%% (%s)\n' \
+            "$ACTIVE" "$1" "$2" "$(enforced && echo enforced || echo paused)"
+    fi
+}
+
+refresh_waybar() { pkill -RTMIN+9 -x waybar 2>/dev/null || true; }
+
+notify() {
+    if command -v notify-send >/dev/null; then
+        notify-send -t 3000 "powerctl" "$1"
+    else
+        echo "$1"
+    fi
+}
+
+# waybar on-click. Deliberately toggles ENFORCEMENT via systemd rather than
+# rewriting rules.conf: the polkit rule makes start/stop passwordless, whereas
+# `powerctl cap` needs sudo and would hang waiting for a password with no tty.
+# Changing which rule applies stays a deliberate CLI action.
+cmd_toggle() {
+    if [ "$ACTIVE" = none ]; then
+        notify "No charging rule set — run: powerctl cap 80"
+        return 0
+    fi
+    if enforced; then
+        systemctl stop powerctl.service && _m="Charge rule paused — charges to 100%"
+    else
+        systemctl start powerctl.service && _m="Charge rule on ($ACTIVE)"
+    fi
+    refresh_waybar
+    notify "${_m:-powerctl: systemctl failed}"
+}
+
+usage() {
+    cat <<EOF
+usage: $PROG <command>
+
+  list                       all rules, live values, drift warnings
+  status [--waybar]          one-line summary; --waybar emits JSON
+  toggle                     pause/resume enforcement (waybar on-click)
+  cap <percent>              set and activate the cap rule
+  health [--explain]         activate the SoH-derived rule
+  off                        restore 100/100
+  apply [--restore]          re-apply current rule (used by systemd)
+
+  idle                       show screen/sleep timeouts per power source
+  idle set <ac|bat> <screen|sleep> <30s|5m|1h|never>
+  idle apply                 regenerate swayidle command and restart it
+EOF
+}
+
+# --------------------------------------------------------------------- main
+
+case ${1:-list} in
+list)   cmd_list ;;
+status) shift; cmd_status "$@" ;;
+toggle) cmd_toggle ;;
+apply)  shift; cmd_apply "$@" ;;
+idle)   shift; cmd_idle "$@" ;;
+
+cap)
+    [ $# -eq 2 ] || die "usage: $PROG cap <percent>"
+    case $2 in ''|*[!0-9]*) die "not a percentage: $2" ;; esac
+    [ "$2" -ge 20 ] && [ "$2" -le 100 ] || die "cap must be 20-100"
+    need_root cap "$2"
+    _start=$(( $2 - 5 )); [ "$_start" -lt 0 ] && _start=0
+    set_key "$CONF" CAP_STOP "$2"
+    set_key "$CONF" CAP_START "$_start"
+    set_key "$CONF" ACTIVE cap
+    ACTIVE=cap CAP_STOP=$2 CAP_START=$_start
+    cmd_apply
+    refresh_waybar
+    printf 'cap: start %s%% stop %s%%\n' "$_start" "$2"
+    ;;
+
+health)
+    if [ "${2:-}" = --explain ]; then
+        _s=$(soh) || die "cannot read battery health"
+        _t=$(health_target "$_s")
+        cat <<EOF
+inputs
+  charge_full / charge_full_design   $(cat "$BAT/charge_full") / $(cat "$BAT/charge_full_design")
+  state of health                    ${_s}%
+  cycle count                        $(cat "$BAT/cycle_count" 2>/dev/null || echo n/a)
+  chemistry                          $CHEMISTRY (assumed; not readable from hardware)
+
+policy (SoH -> target, clamped to ${HEALTH_FLOOR}-${HEALTH_CEILING})
+  >= 90%  -> 75    healthy: spend margin on longevity
+  >= 80%  -> 80    the usual compromise
+  >= 70%  -> 85    degraded: capping now costs more than it saves
+  <  70%  -> 90    worn: prioritise usable runtime
+
+result
+  target ${_t}%, resume at $(( _t - 5 ))%
+
+This is a tunable policy, not a derived optimum.
+EOF
+        exit 0
+    fi
+    need_root health
+    set_key "$CONF" ACTIVE health
+    ACTIVE=health
+    cmd_apply
+    refresh_waybar
+    cmd_status
+    ;;
+
+off)
+    need_root off
+    set_key "$CONF" ACTIVE none
+    ACTIVE=none
+    cmd_apply --restore
+    refresh_waybar
+    echo "charge rules off (100/100)"
+    ;;
+
+-h|--help|help) usage ;;
+*) die "unknown command: $1 (try '$PROG --help')" ;;
+esac

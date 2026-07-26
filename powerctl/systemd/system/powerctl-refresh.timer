@@ -1,0 +1,12 @@
+[Unit]
+Description=Weekly recompute of the battery health rule
+
+[Timer]
+# State of health moves over months, so weekly is ample -- this exists so the
+# health rule tracks the battery as it ages, not to poll anything.
+OnCalendar=weekly
+Persistent=yes
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target

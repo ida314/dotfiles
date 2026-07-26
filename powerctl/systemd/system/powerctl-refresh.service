@@ -1,0 +1,8 @@
+[Unit]
+Description=Recompute and reapply the battery health rule
+ConditionPathExistsGlob=/sys/class/power_supply/*/charge_control_end_threshold
+
+[Service]
+Type=oneshot
+# No-op when charging rules are off, so the timer never re-enables them.
+ExecStart=/usr/bin/systemctl try-restart powerctl.service

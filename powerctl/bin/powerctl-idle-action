@@ -1,0 +1,54 @@
+#!/bin/sh
+# swayidle handler, invoked as: powerctl-idle-action <screen|sleep> <timeout>
+#
+# Every configured timeout is registered with swayidle, including ones that only
+# apply on the other power source. This handler no-ops unless the timeout that
+# fired is the one configured for the CURRENT source -- which is what lets AC
+# transitions take effect without restarting swayidle and resetting its counter.
+
+set -eu
+
+kind=${1:?usage: powerctl-idle-action <screen|sleep> <timeout>}
+fired=${2:?}
+
+IDLE_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/powerctl/idle.conf"
+
+IDLE_AC_SCREEN=600
+IDLE_AC_SLEEP=0
+IDLE_BAT_SCREEN=180
+IDLE_BAT_SLEEP=600
+# shellcheck source=/dev/null
+[ -r "$IDLE_CONF" ] && . "$IDLE_CONF"
+
+on_ac=0
+for d in /sys/class/power_supply/*/; do
+    if [ -f "$d/online" ] && [ "$(cat "$d/type" 2>/dev/null)" = Mains ]; then
+        [ "$(cat "$d/online" 2>/dev/null || echo 0)" = 1 ] && on_ac=1
+        break
+    fi
+done
+
+case "$kind:$on_ac" in
+    screen:1) want=$IDLE_AC_SCREEN ;;
+    screen:0) want=$IDLE_BAT_SCREEN ;;
+    sleep:1)  want=$IDLE_AC_SLEEP ;;
+    sleep:0)  want=$IDLE_BAT_SLEEP ;;
+    *) exit 0 ;;
+esac
+
+# Not the timeout for this power source -- another registration owns it.
+[ "$fired" = "$want" ] || exit 0
+[ "$want" -gt 0 ] || exit 0
+
+case $kind in
+screen)
+    wlopm --off '*' 2>/dev/null || true
+    exec "$HOME/.local/bin/dwl-lock"
+    ;;
+sleep)
+    # Temporary override from dwl-suspend-toggle. "Off until I say otherwise" is
+    # a different intent from a configured "never", so it stays a separate knob.
+    [ -e "$HOME/.local/state/dwl/no-suspend" ] && exit 0
+    exec systemctl suspend
+    ;;
+esac

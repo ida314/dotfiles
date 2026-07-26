@@ -1,0 +1,10 @@
+// Let wheel manage powerctl's units without a password prompt, so the waybar
+// click works. Scoped to these units and the verbs a toggle needs.
+polkit.addRule(function (action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        /^powerctl(-resume|-refresh)?\.(service|timer)$/.test(action.lookup("unit")) &&
+        /^(start|stop|restart|try-restart)$/.test(action.lookup("verb")) &&
+        subject.isInGroup("wheel")) {
+        return polkit.Result.YES;
+    }
+});

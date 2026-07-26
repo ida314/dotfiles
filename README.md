@@ -18,6 +18,8 @@ Managed as a normal repo (copy in/out); layout follows the bare-repo pattern:
 | `.config/redshift.conf` | night-light temps |
 | `.config/autorandr/docked/` | external-monitor profile (EDID-specific to current displays) |
 | `dwm/config.h`, `slstatus/config.h`, `slock/config.h` | suckless build configs (source-compiled) |
+| `powerctl/` | battery charging + idle rules; `cd powerctl && make install` |
+| `docs/` | design notes — see `docs/powerctl.md` |
 | `.local/bin/` | custom scripts — run **`scripts`** to list them (see below; don't hand-maintain) |
 | `etc/` | files that live under `/etc` — `keyd/`, `ly/` (ly assets + `verify_scaler.py`) |
 
@@ -25,6 +27,10 @@ Managed as a normal repo (copy in/out); layout follows the bare-repo pattern:
 
 - **suckless** (`dwm`/`slstatus`/`slock`): drop each `config.h` into its source tree
   and `sudo make clean install` — the binaries aren't tracked here.
+- **powerctl**: `cd powerctl && make install` (as your normal user, not with sudo).
+  Charging rules install inactive; enable with `powerctl cap 80`. Requires
+  commenting out the swayidle line in `~/.config/dwl/startup.sh` — see
+  `docs/powerctl.md`.
 - **T2 Mac kernel/hardware, services, group memberships**: see `~/README.md`.
 - **tmux plugins**: `git clone https://github.com/tmux-plugins/tpm ~/.config/tmux/plugins/tpm`
   then `prefix + I`.

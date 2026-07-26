@@ -6,7 +6,7 @@
 
   "modules-left": ["dwl/tags", "dwl/window"],
   "modules-center": ["clock"],
-  "modules-right": ["tray", "memory", "custom/powerprofile", "custom/suspend", "network", "bluetooth", "pulseaudio", "backlight", "battery"],
+  "modules-right": ["tray", "memory", "custom/powerprofile", "custom/suspend", "network", "bluetooth", "pulseaudio", "backlight", "custom/chargecap", "battery"],
 
   "dwl/tags": {
     "num-tags": 9
@@ -79,6 +79,15 @@
     "format-icons": ["󰃝", "󰃟", "󰃠"],
     "on-scroll-up": "brightnessctl set +5%",
     "on-scroll-down": "brightnessctl set 5%-"
+  },
+
+  "custom/chargecap": {
+    "exec": "powerctl status --waybar",
+    "return-type": "json",
+    "interval": "once",
+    "signal": 9,
+    "on-click": "powerctl toggle",
+    "tooltip": true
   },
 
   "battery": {
