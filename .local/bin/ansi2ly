@@ -1,0 +1,808 @@
+#!/usr/bin/env python3
+"""ansi2ly - turn ANSI art (.ANS) into a .dur background sized for ly.
+
+Reports the console geometry ly will actually draw into, scales the art to it
+in one of two modes, converts to durdraw's .dur format, and optionally installs
+it.
+
+    ./ansi2ly.py https://16colo.rs/pack/ansipics/raw/2TOONS.ANS --fit
+    ./ansi2ly.py 2TOONS.ANS --stretch -o /tmp/big.dur
+    ./ansi2ly.py 2TOONS.ANS --fit --install --align topcenter
+    ./ansi2ly.py --info
+
+Modes:
+  --fit      scale up as far as it goes with x and y scaled equally, so the
+             art keeps its proportions (default)
+  --stretch  scale x and y independently to fill the console exactly; fills
+             the screen but distorts the picture
+
+Why the built-in terminal emulator: classic ANSI art is drawn with cursor
+motion (backwards-draw ESC[2D, save/restore ESC[s/ESC[u, jumps ESC[y;xH), and
+durdraw's importer mis-detects geometry on those. Replaying the escape codes
+onto a virtual screen flattens the art to plain rows plus colour, which
+durdraw then imports correctly.
+"""
+
+import argparse
+import gzip
+import json
+import os
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import urllib.request
+
+# ---------------------------------------------------------------- console ---
+
+FONT_DIRS = ['/usr/lib/kbd/consolefonts', '/usr/share/kbd/consolefonts']
+DEFAULT_CELL = (8, 16)
+
+
+def screen_resolution():
+    """Panel resolution in pixels, from DRM (this console has no /dev/fb0)."""
+    best = None
+    drm = '/sys/class/drm'
+    if os.path.isdir(drm):
+        for conn in sorted(os.listdir(drm)):
+            base = os.path.join(drm, conn)
+            try:
+                # Filter on status, not on "enabled": once a Wayland compositor
+                # takes over the DRM device the connector reads back as
+                # disabled even though the panel is plainly still attached.
+                if open(os.path.join(base, 'status')).read().strip() != 'connected':
+                    continue
+                mode = open(os.path.join(base, 'modes')).readline().strip()
+            except OSError:
+                continue
+            m = re.match(r'(\d+)x(\d+)', mode)
+            if m:
+                w, h = int(m.group(1)), int(m.group(2))
+                if not best or w * h > best[0] * best[1]:
+                    best = (w, h, conn)
+    if best:
+        return best
+    try:
+        w, h = open('/sys/class/graphics/fb0/virtual_size').read().strip().split(',')
+        return int(w), int(h), 'fb0'
+    except OSError:
+        return 1920, 1080, 'unknown (assumed)'
+
+
+def console_font():
+    """Console font name from /etc/vconsole.conf."""
+    try:
+        for line in open('/etc/vconsole.conf'):
+            if line.startswith('FONT='):
+                return line.split('=', 1)[1].strip().strip('"\'')
+    except OSError:
+        pass
+    return None
+
+
+def font_cell(name):
+    """(width, height) in pixels, read from the PSF header - never guessed."""
+    if not name:
+        return DEFAULT_CELL
+    path = None
+    for d in FONT_DIRS:
+        for ext in ('.psfu.gz', '.psf.gz', '.psfu', '.psf'):
+            p = os.path.join(d, name + ext)
+            if os.path.exists(p):
+                path = p
+                break
+        if path:
+            break
+    if not path:
+        return DEFAULT_CELL
+    opener = gzip.open if path.endswith('.gz') else open
+    with opener(path, 'rb') as fh:
+        data = fh.read(64)
+    if data[:2] == b'\x36\x04':                       # PSF1: always 8 wide
+        return 8, data[3]
+    if data[:4] == b'\x72\xb5\x4a\x86':               # PSF2
+        h = struct.unpack('<I', data[24:28])[0]
+        w = struct.unpack('<I', data[28:32])[0]
+        return w, h
+    return DEFAULT_CELL
+
+
+def font_glyphs(name):
+    """Characters the console font can actually draw, from its PSF unicode table.
+
+    Console fonts hold only 256 or 512 glyphs, and which ones varies a lot by
+    variant: Terminus `ter-1NNn` is ISO-8859-1 and has NO half-blocks, while
+    `ter-uNNn` is the Unicode build and has them all. Emitting a glyph the font
+    lacks does not fail loudly - the kernel just substitutes a placeholder, so
+    the art fills with stray characters. Returns None if coverage can't be
+    determined, meaning "assume everything is fine".
+    """
+    if not name:
+        return None
+    path = None
+    for d in FONT_DIRS:
+        for ext in ('.psfu.gz', '.psf.gz', '.psfu', '.psf'):
+            p = os.path.join(d, name + ext)
+            if os.path.exists(p):
+                path = p
+                break
+        if path:
+            break
+    if not path:
+        return None
+    opener = gzip.open if path.endswith('.gz') else open
+    try:
+        data = opener(path, 'rb').read()
+    except OSError:
+        return None
+    chars = set()
+    try:
+        if data[:4] == b'\x72\xb5\x4a\x86':                     # PSF2
+            _, hdr, flags, length, charsize, _, _ = struct.unpack('<IIIIIII', data[4:32])
+            if not flags & 1:
+                return None
+            for g in data[hdr + length * charsize:].split(b'\xff')[:length]:
+                for part in g.split(b'\xfe'):
+                    try:
+                        chars.update(part.decode('utf-8'))
+                    except UnicodeDecodeError:
+                        pass
+        elif data[:2] == b'\x36\x04':                           # PSF1
+            mode, charsize = data[2], data[3]
+            if not mode & 6:
+                return None
+            n = 512 if mode & 1 else 256
+            for g in data[4 + n * charsize:].split(b'\xff\xff')[:n]:
+                for i in range(0, len(g) - 1, 2):
+                    v = struct.unpack('<H', g[i:i + 2])[0]
+                    if v != 0xfffe:
+                        chars.add(chr(v))
+        else:
+            return None
+    except Exception:
+        return None
+    return chars or None
+
+
+def suggest_font(cell, need):
+    """Find a console font with the same cell size that has every glyph needed."""
+    seen, out = set(), []
+    for d in FONT_DIRS:
+        if not os.path.isdir(d):
+            continue
+        for fn in sorted(os.listdir(d)):
+            name = re.sub(r'\.psfu?(\.gz)?$', '', fn)
+            if name in seen or name == fn:
+                continue
+            seen.add(name)
+            if font_cell(name) != cell:
+                continue
+            g = font_glyphs(name)
+            if g and not (need - g):
+                out.append(name)
+    return out
+
+
+def tty_size():
+    """Ask the kernel for the real console grid.
+
+    This is authoritative and must win over any calculation: /etc/vconsole.conf
+    only records the font that will be loaded at the *next* boot, so computing
+    cols/rows from it silently reports the wrong size whenever a font change is
+    still pending.
+    """
+    import fcntl
+    import termios
+    for dev in ('/dev/tty1', '/dev/tty0', '/dev/console'):
+        try:
+            with open(dev, 'rb') as fh:
+                r, c, _, _ = struct.unpack(
+                    'HHHH', fcntl.ioctl(fh, termios.TIOCGWINSZ, b'\0' * 8))
+            if r and c:
+                return c, r, dev
+        except Exception:
+            continue
+    return None
+
+
+def console_geometry():
+    px_w, px_h, conn = screen_resolution()
+    font = console_font()
+    cw, ch = font_cell(font)
+    calc_cols, calc_rows = px_w // cw, px_h // ch
+
+    live = tty_size()
+    if live:
+        cols, rows, src = live[0], live[1], live[2]
+        cell = (px_w // cols, px_h // rows) if cols and rows else (cw, ch)
+    else:
+        cols, rows, src = calc_cols, calc_rows, 'calculated'
+        cell = (cw, ch)
+
+    return {
+        'px': (px_w, px_h), 'connector': conn, 'font': font or 'default',
+        'cell': cell, 'cols': cols, 'rows': rows, 'source': src,
+        'calc': (calc_cols, calc_rows), 'conf_cell': (cw, ch),
+    }
+
+
+# ------------------------------------------------------- terminal emulator ---
+
+# Everything is normalised to a 16-colour index (0-15). ly draws on black, so
+# a default background is simply black and a default foreground is grey/white.
+DEFAULT_FG, DEFAULT_BG = 7, 0
+
+CSI = re.compile(r'\x1b\[([0-9;?]*)([A-Za-z])')
+
+
+class Screen:
+    """Minimal ANSI screen: the subset classic art actually uses."""
+
+    def __init__(self, cols=80, rows=200):
+        self.cols, self.rows = cols, rows
+        self.ch = [[' '] * cols for _ in range(rows)]
+        self.fg = [[DEFAULT_FG] * cols for _ in range(rows)]
+        self.bg = [[DEFAULT_BG] * cols for _ in range(rows)]
+        self.x = self.y = 0
+        self.cur_fg, self.cur_bg, self.bold = DEFAULT_FG, DEFAULT_BG, False
+        self.saved = (0, 0, DEFAULT_FG, DEFAULT_BG, False)
+
+    def _sgr(self, params):
+        for p in params:
+            if p in (0, None):
+                self.cur_fg, self.cur_bg, self.bold = DEFAULT_FG, DEFAULT_BG, False
+            elif p == 1:
+                self.bold = True
+            elif p in (22, 2):
+                self.bold = False
+            elif 30 <= p <= 37:
+                self.cur_fg = p - 30
+            elif p == 39:
+                self.cur_fg = DEFAULT_FG
+            elif 40 <= p <= 47:
+                self.cur_bg = p - 40
+            elif p == 49:
+                self.cur_bg = DEFAULT_BG
+            elif 90 <= p <= 97:
+                self.cur_fg, self.bold = p - 90, True
+
+    def put(self, c):
+        if self.x >= self.cols:            # wrap like a real terminal
+            self.x = 0
+            self.y += 1
+        if 0 <= self.y < self.rows and 0 <= self.x < self.cols:
+            self.ch[self.y][self.x] = c
+            self.fg[self.y][self.x] = self.cur_fg + (8 if self.bold else 0)
+            self.bg[self.y][self.x] = self.cur_bg
+        self.x += 1
+
+    def feed(self, text):
+        i = 0
+        while i < len(text):
+            c = text[i]
+            if c == '\x1b':
+                m = CSI.match(text, i)
+                if not m:
+                    i += 1
+                    continue
+                raw, final = m.group(1), m.group(2)
+                nums = [int(p) if p.isdigit() else 0 for p in raw.split(';')] if raw else [0]
+                n = nums[0] if nums else 0
+                if final == 'm':
+                    self._sgr(nums)
+                elif final == 'H' or final == 'f':
+                    self.y = (nums[0] - 1 if len(nums) > 0 and nums[0] else 0)
+                    self.x = (nums[1] - 1 if len(nums) > 1 and nums[1] else 0)
+                elif final == 'A':
+                    self.y = max(0, self.y - max(1, n))
+                elif final == 'B':
+                    self.y += max(1, n)
+                elif final == 'C':
+                    self.x += max(1, n)
+                elif final == 'D':
+                    self.x = max(0, self.x - max(1, n))
+                elif final == 's':
+                    self.saved = (self.x, self.y, self.cur_fg, self.cur_bg, self.bold)
+                elif final == 'u':
+                    self.x, self.y, self.cur_fg, self.cur_bg, self.bold = self.saved
+                elif final == 'J':
+                    if n in (2, 3):
+                        self.__init__(self.cols, self.rows)
+                i = m.end()
+                continue
+            if c == '\n':
+                self.y += 1
+                self.x = 0
+            elif c == '\r':
+                self.x = 0
+            elif c == '\x1a':              # DOS EOF - art after this is padding
+                break
+            elif c == '\t':
+                self.x = (self.x // 8 + 1) * 8
+            elif c >= ' ':
+                self.put(c)
+            i += 1
+
+    def trimmed(self):
+        """Crop to the bounding box of non-blank content."""
+        last = -1
+        for y in range(self.rows):
+            if any(self.ch[y][x] != ' ' or self.bg[y][x] != DEFAULT_BG
+                   for x in range(self.cols)):
+                last = y
+        h = last + 1
+        w = self.cols
+        while w > 1 and all(self.ch[y][w - 1] == ' ' and self.bg[y][w - 1] == DEFAULT_BG
+                            for y in range(h)):
+            w -= 1
+        cells = [[(self.ch[y][x], self.fg[y][x], self.bg[y][x]) for x in range(w)]
+                 for y in range(h)]
+        return cells, w, h
+
+
+def render_ans(data):
+    """Decode CP437 bytes and replay them onto a virtual screen."""
+    if isinstance(data, bytes):
+        # SAUCE metadata record, if present, is not art
+        idx = data.rfind(b'\x1aSAUCE')
+        if idx != -1:
+            data = data[:idx]
+        try:
+            text = data.decode('utf-8')
+            if '�' in text:
+                raise UnicodeDecodeError('utf-8', b'', 0, 1, '')
+        except UnicodeDecodeError:
+            text = data.decode('cp437')
+    else:
+        text = data
+    scr = Screen()
+    scr.feed(text)
+    return scr.trimmed()
+
+
+# ------------------------------------------------------------------ scaling ---
+
+FULL, UPPER, LOWER, LEFT, RIGHT = '█', '▀', '▄', '▌', '▐'
+SHADES = '▓▒░'
+BLOCKS = FULL + UPPER + LOWER + LEFT + RIGHT + SHADES
+
+# Which quadrants each glyph paints: (top-left, top-right, bottom-left, bottom-right)
+QUADRANTS = {
+    FULL:  (1, 1, 1, 1),
+    UPPER: (1, 1, 0, 0),
+    LOWER: (0, 0, 1, 1),
+    LEFT:  (1, 0, 1, 0),
+    RIGHT: (0, 1, 0, 1),
+}
+
+
+def to_subpixels(cells, w, h):
+    """Expand cells to a 2x2-per-cell grid of *coverage*, plus which source
+    cell each subpixel came from.
+
+    Coverage is deliberately a flag rather than a resolved colour. Resolving to
+    colours here would lose which of the pair was foreground and which was
+    background, and the cell would later have to guess a new pair - that is how
+    bright colours end up dimmed into a background slot. Keeping geometry and
+    colour separate lets every output cell reuse an original fg/bg pair intact.
+
+    Shades and text paint as background here; both are repainted afterwards.
+    """
+    sw, sh = w * 2, h * 2
+    cov = [[0] * sw for _ in range(sh)]
+    src = [[0] * sw for _ in range(sh)]
+    for y in range(h):
+        for x in range(w):
+            ch, fg, bg = cells[y][x]
+            quads = (1, 1, 1, 1) if ch in SHADES else QUADRANTS.get(ch, (0, 0, 0, 0))
+            for q in range(4):
+                cov[y * 2 + q // 2][x * 2 + q % 2] = quads[q]
+                src[y * 2 + q // 2][x * 2 + q % 2] = y * w + x
+    return cov, src, sw, sh
+
+
+def resample(grid, sw, sh, tw, th):
+    """Nearest-neighbour resize of the subpixel grid."""
+    return [[grid[min(sh - 1, y * sh // th)][min(sw - 1, x * sw // tw)]
+             for x in range(tw)] for y in range(th)]
+
+
+# Coverage pattern (top-left, top-right, bottom-left, bottom-right) -> glyph.
+# These six are exactly the patterns a single cell can represent losslessly.
+# Quadrant glyphs are deliberately not used: they are absent from CP437 and
+# console fonts may lack them.
+PATTERN_GLYPH = {
+    (1, 1, 1, 1): FULL,
+    (0, 0, 0, 0): ' ',
+    (1, 1, 0, 0): UPPER,
+    (0, 0, 1, 1): LOWER,
+    (1, 0, 1, 0): LEFT,
+    (0, 1, 0, 1): RIGHT,
+}
+
+
+def _ragged_glyph(pattern):
+    """Approximate a 2x2 block that no single glyph can express."""
+    tl, tr, bl, br = pattern
+    n = tl + tr + bl + br
+    if n >= 3:
+        return FULL
+    if n <= 1:
+        return ' '
+    top, bottom, left, right = tl + tr, bl + br, tl + bl, tr + br
+    if top != bottom:
+        return UPPER if top > bottom else LOWER
+    if left != right:
+        return LEFT if left > right else RIGHT
+    return FULL
+
+
+def _degrade(glyph, pattern, allowed):
+    """Replace a glyph the console font lacks with the closest one it has.
+
+    Losing the half-blocks costs sub-cell precision, so the art gets blockier,
+    but every cell still renders as artwork instead of a placeholder character.
+    """
+    if allowed is None or glyph in allowed or glyph == ' ':
+        return glyph
+    n = sum(pattern)
+    if glyph in SHADES:
+        for alt in SHADES:                       # try another shade first
+            if alt in allowed:
+                return alt
+        return FULL if FULL in allowed else ' '
+    if FULL in allowed:                          # half-block -> solid or empty
+        return FULL if n >= 2 else ' '
+    return ' '
+
+
+def to_cells(cov, src, cells, w, w2, h2, allowed=None):
+    """Fold each 2x2 coverage block into one cell, reusing source colours.
+
+    The colour pair is taken wholesale from the source cell the block came
+    from, never recombined from neighbours. That keeps every emitted pair one
+    that already existed in the artwork, so a foreground stays a foreground and
+    no colour has to be dimmed to fit a background slot.
+    """
+    rows = []
+    for y in range(0, h2, 2):
+        row = []
+        for x in range(0, w2, 2):
+            x1 = x + 1 if x + 1 < w2 else x
+            y1 = y + 1 if y + 1 < h2 else y
+            pattern = (cov[y][x], cov[y][x1], cov[y1][x], cov[y1][x1])
+            # A cell straddling a boundary draws subpixels from up to four
+            # source cells; take the colours of whichever contributes most, so
+            # the pair matches the geometry rather than an arbitrary corner.
+            idxs = (src[y][x], src[y][x1], src[y1][x], src[y1][x1])
+            idx = max(set(idxs), key=lambda i: (idxs.count(i), -idxs.index(i)))
+            sy, sx = divmod(idx, w)
+            _, fg, bg = cells[sy][sx]
+            glyph = PATTERN_GLYPH.get(pattern) or _ragged_glyph(pattern)
+            row.append((_degrade(glyph, pattern, allowed), fg, bg))
+        rows.append(row)
+    return rows
+
+
+def overlay_shades(dst, src_cells, w, h, tw, th, allowed=None):
+    """Repaint shade glyphs (▓▒░) over the scaled result.
+
+    Shades are a dither texture, not geometry: rasterising them as solid would
+    lose the texture, so each destination cell that maps back to a shade cell
+    gets the shade glyph itself. Being scale-free, they simply repeat.
+    """
+    n = 0
+    for y in range(th):
+        sy = min(h - 1, y * h // th)
+        for x in range(tw):
+            sx = min(w - 1, x * w // tw)
+            ch, fg, bg = src_cells[sy][sx]
+            if ch in SHADES:
+                dst[y][x] = (_degrade(ch, (1, 1, 1, 1), allowed), fg, bg)
+                n += 1
+    return n
+
+
+def overlay_text(dst, src_cells, w, h, sx, sy):
+    """Redraw runs of real text at 1x - scaled-up letters are unreadable."""
+    n = 0
+    for y in range(h):
+        x = 0
+        while x < w:
+            ch = src_cells[y][x][0]
+            if ch == ' ' or ch in BLOCKS:
+                x += 1
+                continue
+            run = []
+            while x < w:
+                c, fg, bg = src_cells[y][x]
+                if c == ' ' or c in BLOCKS:
+                    break
+                run.append((c, fg, bg))
+                x += 1
+            dy, dx0 = int(y * sy), int(x - len(run))
+            dx0 = int(dx0 * sx)
+            if 0 <= dy < len(dst):
+                for i, (c, fg, bg) in enumerate(run):
+                    if dx0 + i < len(dst[dy]):
+                        dst[dy][dx0 + i] = (c, fg, bg)
+                n += 1
+    return n
+
+
+def scale_art(cells, w, h, tw, th, allowed=None):
+    cov, src, sw, sh = to_subpixels(cells, w, h)
+    cov = resample(cov, sw, sh, tw * 2, th * 2)
+    src = resample(src, sw, sh, tw * 2, th * 2)
+    out = to_cells(cov, src, cells, w, tw * 2, th * 2, allowed)
+    overlay_shades(out, cells, w, h, tw, th, allowed)
+    overlay_text(out, cells, w, h, tw / w, th / h)
+    return out
+
+
+# ------------------------------------------------------------------ output ---
+
+def emit_ansi(rows):
+    """Flat SGR text: no cursor motion, so durdraw imports it correctly."""
+    out = []
+    for row in rows:
+        line, fg, bg = [], None, None
+        for ch, f, b in row:
+            if f != fg or b != bg:
+                line.append('\x1b[0m')
+                if f >= 8:
+                    line.append(f'\x1b[1;{30 + f % 8}m')
+                elif f != DEFAULT_FG:
+                    line.append(f'\x1b[{30 + f}m')
+                if b:
+                    line.append(f'\x1b[{40 + b % 8}m')
+                fg, bg = f, b
+            line.append(ch)
+        line.append('\x1b[0m')
+        out.append(''.join(line))
+    return '\n'.join(out) + '\n'
+
+
+def durdraw_paths():
+    base = '/home/dylan/.local/share/uv/tools/durdraw'
+    py = os.path.join(base, 'bin', 'python')
+    libs = []
+    for lib in ('lib', 'lib64'):
+        d = os.path.join(base, lib)
+        if os.path.isdir(d):
+            for v in os.listdir(d):
+                sp = os.path.join(d, v, 'site-packages')
+                if os.path.isdir(sp):
+                    libs.append(sp)
+    return (py if os.path.exists(py) else sys.executable), os.pathsep.join(libs)
+
+
+IMPORT_SNIPPET = r'''
+import sys, gzip, json, re, collections
+from durdraw.durdraw_appstate import AppState
+from durdraw.durdraw_options import Options
+from durdraw.durdraw_movie import Movie
+import durdraw.durdraw_ansiparse as ansiparse
+import durdraw.durdraw_file as durfile
+
+flat, out, rows, cols = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+st = AppState(); st.colorMode = "16"; st.charEncoding = "utf-8"
+st.debug = False; st.sauce = None; st.playOnlyMode = True
+raw = open(flat, encoding="utf-8").read()
+frame = ansiparse.parse_ansi_escape_codes(raw, filename=None, appState=st,
+                                          caller=None, console=True, maxWidth=cols)
+opts = Options(width=frame.width, height=frame.height); opts.framerate = 10.0
+mov = Movie(opts); mov.addFrame(frame); mov.deleteCurrentFrame()
+durfile.serialize_to_json_file(opts, st, mov, out, gzipped=True)
+
+# Trim durdraw's padding rows and repair its colour bleed: it sometimes carries
+# the previous background into a cell whose SGR state had reset. The SGR ->
+# palette index mapping is re-derived per file by majority vote, so no
+# hardcoded palette order is assumed.
+SGR = re.compile("\x1b\\[([0-9;]*)m")
+def grid(path, rows, cols):
+    g = []; fg, bg, bold = 39, 49, False
+    for line in open(path, encoding="utf-8").read().split("\n")[:rows]:
+        cells = []; i = 0
+        while i < len(line):
+            m = SGR.match(line, i)
+            if m:
+                for p in (m.group(1) or "0").split(";"):
+                    p = int(p or 0)
+                    if p == 0: fg, bg, bold = 39, 49, False
+                    elif p == 1: bold = True
+                    elif p == 22: bold = False
+                    elif 30 <= p <= 37 or p == 39: fg = p
+                    elif 40 <= p <= 47 or p == 49: bg = p
+                i = m.end(); continue
+            cells.append((line[i], fg, bg, bold)); i += 1
+        cells += [(" ", fg, bg, bold)] * (cols - len(cells))
+        g.append(cells[:cols])
+    while len(g) < rows: g.append([(" ", 39, 49, False)] * cols)
+    return g
+
+d = json.loads(gzip.open(out, "rb").read()); m = d["DurMovie"]; fr = m["frames"][0]
+m["sizeY"] = rows
+fr["contents"] = fr["contents"][:rows]
+fr["colorMap"] = [c[:rows] for c in fr["colorMap"]]
+src = grid(flat, rows, cols); cm = fr["colorMap"]
+nb = lambda b: 49 if b in (40, 49) else b
+fv = collections.defaultdict(collections.Counter)
+bv = collections.defaultdict(collections.Counter)
+for y in range(rows):
+    for x in range(cols):
+        ch, fg, bg, bold = src[y][x]
+        fv[(fg, bold)][cm[x][y][0]] += 1
+        bv[nb(bg)][cm[x][y][1]] += 1
+fm = {k: v.most_common(1)[0][0] for k, v in fv.items()}
+bm = {k: v.most_common(1)[0][0] for k, v in bv.items()}
+fixed = 0
+for y in range(rows):
+    for x in range(cols):
+        ch, fg, bg, bold = src[y][x]
+        for idx, want in ((0, fm[(fg, bold)]), (1, bm[nb(bg)])):
+            if cm[x][y][idx] != want:
+                cm[x][y][idx] = want; fixed += 1
+with gzip.open(out, "wt") as fh:
+    fh.write(json.dumps(d, indent=2))
+print(f"{m['sizeX']}x{m['sizeY']} {fixed}")
+'''
+
+
+def write_dur(rows, path):
+    py, pypath = durdraw_paths()
+    h = len(rows)
+    w = len(rows[0]) if h else 0
+    with tempfile.NamedTemporaryFile('w', suffix='.ans', delete=False,
+                                     encoding='utf-8') as fh:
+        fh.write(emit_ansi(rows))
+        flat = fh.name
+    env = dict(os.environ, PYTHONPATH=pypath)
+    try:
+        res = subprocess.run([py, '-c', IMPORT_SNIPPET, flat, path, str(h), str(w)],
+                             capture_output=True, text=True, env=env)
+    finally:
+        os.unlink(flat)
+    if res.returncode != 0:
+        sys.exit('durdraw conversion failed:\n' + (res.stderr or res.stdout))
+    tail = res.stdout.strip().split('\n')[-1].split()
+    return tail[0], int(tail[1]) if len(tail) > 1 else 0
+
+
+# ----------------------------------------------------------------- install ---
+
+def install(dur_path, align):
+    dest = '/etc/ly/' + os.path.basename(dur_path)
+    cmds = [
+        ['sudo', 'install', '-m', '0644', '-o', 'root', '-g', 'root', dur_path, dest],
+        ['sudo', 'restorecon', '-v', dest],
+        ['sudo', 'sed', '-i',
+         '-e', 's|^animation = .*|animation = dur_file|',
+         '-e', f's|^dur_file_path = .*|dur_file_path = {dest}|',
+         '-e', f's|^dur_offset_alignment = .*|dur_offset_alignment = {align}|',
+         '/etc/ly/config.ini'],
+    ]
+    backup = '/etc/ly/config.ini.bak.ansi2ly'
+    if not os.path.exists(backup):
+        cmds.insert(2, ['sudo', 'cp', '-a', '/etc/ly/config.ini', backup])
+    print(f'\nInstalling to {dest} (SELinux: ly runs as xdm_t and cannot read '
+          f'$HOME, so the file must be copied into /etc/ly, not symlinked)')
+    for c in cmds:
+        print('  $ ' + ' '.join(c))
+        if subprocess.run(c).returncode != 0:
+            sys.exit('install step failed')
+    print(f'\nInstalled. Config backup: {backup}')
+    print('Apply with a reboot, or `sudo systemctl restart ly@tty1` from another VT '
+          '(that kills the current session).')
+
+
+# -------------------------------------------------------------------- main ---
+
+def main():
+    ap = argparse.ArgumentParser(
+        description='Convert ANSI art into a .dur background for ly.',
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('source', nargs='?', help='.ANS file path or URL')
+    ap.add_argument('-o', '--out', help='output .dur (default: alongside source)')
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument('--fit', action='store_true',
+                      help='scale up equally in x and y, keeping proportions (default)')
+    mode.add_argument('--stretch', action='store_true',
+                      help='scale x and y independently to fill the console exactly')
+    ap.add_argument('--scale', type=float,
+                    help='override with an explicit scale factor')
+    ap.add_argument('--margin', type=int, default=0,
+                    help='leave N cells of margin around the art (default 0)')
+    ap.add_argument('--cols', type=int, help='override detected console columns')
+    ap.add_argument('--rows', type=int, help='override detected console rows')
+    ap.add_argument('--install', action='store_true',
+                    help='copy into /etc/ly and point ly at it (uses sudo)')
+    ap.add_argument('--align', default='topcenter',
+                    help='dur_offset_alignment when installing (default topcenter)')
+    ap.add_argument('--no-font-check', action='store_true',
+                    help='skip console-font glyph checking')
+    ap.add_argument('--info', action='store_true',
+                    help='just report console geometry and exit')
+    args = ap.parse_args()
+
+    geo = console_geometry()
+    cols = args.cols or geo['cols']
+    rows = args.rows or geo['rows']
+
+    print('Console')
+    print(f"  panel      {geo['px'][0]}x{geo['px'][1]} px  ({geo['connector']})")
+    print(f"  cell       {geo['cell'][0]}x{geo['cell'][1]} px")
+    print(f"  ly page    {cols} columns x {rows} rows   (from {geo['source']})")
+    if geo['source'] != 'calculated' and geo['calc'] != (geo['cols'], geo['rows']):
+        print(f"  NOTE       /etc/vconsole.conf says FONT={geo['font']} "
+              f"({geo['conf_cell'][0]}x{geo['conf_cell'][1]} px), which would give "
+              f"{geo['calc'][0]}x{geo['calc'][1]}.")
+        print("             That font is not loaded yet - it applies on next boot. "
+              "Sizing to the live console.")
+    box = 3 + 2 * 3 + 2
+    print(f"  login box  ~{box} rows tall, always centred; art taller than "
+          f"~{(rows - box) // 2} rows cannot fully clear it")
+
+    allowed = None if args.no_font_check else font_glyphs(geo['font'])
+    missing = sorted(set(BLOCKS) - allowed) if allowed else []
+    if missing:
+        print(f"  WARNING    font {geo['font']} cannot draw: {' '.join(missing)}")
+        print("             the console silently substitutes a placeholder for "
+              "these (they show up as '#'),")
+        print("             so they are avoided here - at some cost in detail.")
+        alts = suggest_font(geo['cell'], set(BLOCKS))
+        if alts:
+            # prefer the Unicode Terminus build, and its normal weight over bold
+            pref = ([a for a in alts if a.startswith('ter-u') and a.endswith('n')]
+                    or [a for a in alts if a.startswith('ter-u')] or alts)
+            print(f"             for full detail switch to FONT={pref[0]} "
+                  f"(same {geo['cell'][0]}x{geo['cell'][1]} cell)")
+
+    if args.info:
+        return
+    if not args.source:
+        ap.error('a source .ANS file or URL is required (or use --info)')
+
+    if re.match(r'https?://', args.source):
+        print(f'\nFetching {args.source}')
+        with urllib.request.urlopen(args.source) as r:
+            data = r.read()
+        name = os.path.basename(args.source.split('?')[0])
+    else:
+        data = open(args.source, 'rb').read()
+        name = os.path.basename(args.source)
+
+    cells, w, h = render_ans(data)
+    print(f'\nArt      {w}x{h} cells (after replaying cursor motion and cropping)')
+
+    avail_w, avail_h = max(1, cols - 2 * args.margin), max(1, rows - 2 * args.margin)
+    if args.scale:
+        tw, th = int(w * args.scale), int(h * args.scale)
+        mode_name = f'scale x{args.scale:g}'
+    elif args.stretch:
+        tw, th = avail_w, avail_h
+        mode_name = 'stretch (fills console, distorts proportions)'
+    else:
+        s = min(avail_w / w, avail_h / h)
+        tw, th = max(1, int(w * s)), max(1, int(h * s))
+        mode_name = f'fit (equal scale x{s:.2f}, proportions kept)'
+
+    tw, th = min(tw, cols), min(th, rows)
+    rows_out = scale_art(cells, w, h, tw, th, allowed)
+
+    out = args.out or os.path.splitext(name)[0].lower() + f'-{tw}x{th}.dur'
+    size, fixed = write_dur(rows_out, out)
+    print(f'Mode     {mode_name}')
+    print(f'Scaled   {w}x{h} -> {tw}x{th} cells '
+          f'({100 * tw / cols:.0f}% of width, {100 * th / rows:.0f}% of height)')
+    print(f'Wrote    {out}  ({size}, {fixed} colour cells repaired)')
+    print(f'Preview  durdraw -p {out}')
+
+    if args.install:
+        install(os.path.abspath(out), args.align)
+
+
+if __name__ == '__main__':
+    main()

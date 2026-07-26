@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+# List the custom scripts in ~/.local/bin with a one-line summary of each.
+# Reads the summary from each file rather than a hand-kept list, so it cannot
+# go stale the way a README table does. `scripts --readme` prints a Markdown
+# table for pasting into ~/.dotfiles/README.md.
+
+import argparse
+import os
+import re
+import sys
+
+BIN = os.path.expanduser('~/.local/bin')
+DOTFILES = os.path.realpath(os.path.expanduser('~/.dotfiles'))
+
+
+def summary(path):
+    """First line of a script's header comment, or of its docstring.
+
+    Convention already used across these scripts: shebang, then a comment
+    block whose first line says what the thing is.
+    """
+    try:
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            lines = [next(fh, '') for _ in range(40)]
+    except OSError:
+        return ''
+    i = 0
+    if lines and lines[0].startswith('#!'):
+        i = 1
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    if i >= len(lines):
+        return ''
+    line = lines[i].strip()
+    m = re.match(r'^(?:"""|\'\'\')\s*(.*)', line)
+    if m:                                   # python docstring
+        return m.group(1).strip() or (lines[i + 1].strip() if i + 1 < len(lines) else '')
+    if line.startswith('#'):
+        return line.lstrip('#').strip()
+    return ''
+
+
+SRC = os.path.join(DOTFILES, '.local', 'bin')
+
+
+def linked(name):
+    """Is this dotfiles script actually reachable on PATH?"""
+    p = os.path.join(BIN, name)
+    return os.path.exists(p) and os.path.realpath(p) == os.path.join(SRC, name)
+
+
+def entries(mine_only=True):
+    """Dotfiles is the source of truth, so a script that was never symlinked
+    still shows up - that is exactly the kind of thing that gets forgotten."""
+    out = []
+    for name in sorted(os.listdir(SRC)):
+        path = os.path.join(SRC, name)
+        if not os.path.isfile(path):
+            continue
+        out.append((name, summary(path), path, linked(name)))
+    if not mine_only:
+        for name in sorted(os.listdir(BIN)):
+            path = os.path.join(BIN, name)
+            if not os.path.isfile(path) or not os.access(path, os.X_OK):
+                continue
+            if os.path.realpath(path).startswith(DOTFILES):
+                continue
+            out.append((name, summary(os.path.realpath(path)), path, None))
+    return out
+
+
+ap = argparse.ArgumentParser(description=__doc__)
+ap.add_argument('--all', action='store_true',
+                help='include scripts not tracked in ~/.dotfiles')
+ap.add_argument('--readme', action='store_true',
+                help='emit a Markdown table for README.md')
+ap.add_argument('pattern', nargs='?', help='only show names matching this')
+args = ap.parse_args()
+
+rows = entries(mine_only=not args.all)
+if args.pattern:
+    rows = [r for r in rows if args.pattern.lower() in r[0].lower()
+            or args.pattern.lower() in r[1].lower()]
+
+if not rows:
+    print('no scripts found', file=sys.stderr)
+    sys.exit(1)
+
+if args.readme:
+    print('| Script | What |')
+    print('|---|---|')
+    for name, desc, _, _ in rows:
+        print(f'| `{name}` | {desc or "—"} |')
+    sys.exit(0)
+
+width = max(len(r[0]) for r in rows)
+notes = False
+for name, desc, real, on_path in rows:
+    if on_path is None:
+        mark = '*'                       # on PATH but not tracked in dotfiles
+    elif on_path:
+        mark = ' '
+    else:
+        mark = '!'                       # tracked but not symlinked = inactive
+        notes = True
+    print(f'{mark}{name.ljust(width)}  {desc}')
+if notes:
+    print('\n! = in ~/.dotfiles but not symlinked into ~/.local/bin (not on PATH)',
+          file=sys.stderr)
+if args.all:
+    print('* = on PATH but not tracked in ~/.dotfiles', file=sys.stderr)
