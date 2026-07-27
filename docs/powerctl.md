@@ -161,7 +161,7 @@ Recompute on a **weekly timer**, not a daemon: SoH moves over months.
 
 | Path | What |
 |---|---|
-Source of truth is `~/.dotfiles/powerctl/`; `install.sh` places them.
+Source of truth is `~/.dotfiles/powerctl/`; `make install` places them.
 
 | Installed path | From | What |
 |---|---|---|
@@ -199,22 +199,46 @@ throughout, matching `powerprofile-*` — no new dependencies.
 ### CLI surface
 
 ```
-powerctl list                 # all rules, params, which is active, live sysfs values
-powerctl status               # one-line summary (also what waybar reads)
-powerctl cap 80               # set + activate the cap rule
-powerctl health               # activate the health rule
-powerctl health --explain     # show SoH, cycles, chosen target, why
-powerctl off                  # restore 100/100
-powerctl apply                # re-apply current rule (used by unit/timer)
+powerctl list                 # everything: rules, live sysfs values, drift warnings
+powerctl status               # one line;  --waybar emits JSON for the bar
+powerctl toggle               # pause/resume enforcement (the waybar on-click)
+
+powerctl cap 80               # set + activate the cap rule          [sudo]
+powerctl health               # activate the SoH-derived rule        [sudo]
+powerctl health --explain     # show SoH, cycles, chosen target, why  (no sudo)
+powerctl off                  # restore 100/100                      [sudo]
+powerctl apply [--restore]    # re-apply current rule (used by unit/timer)
 
 powerctl idle                 # effective screen/sleep timeouts per source
 powerctl idle set bat screen 3m
 powerctl idle set ac sleep never
+powerctl idle apply           # regenerate swayidle command and restart it
 ```
 
-`list` must show **both** the configured rule and the actual sysfs values —
-they diverge when the driver clamps, and silent divergence is the main failure
-mode here.
+Commands marked `[sudo]` re-exec themselves under sudo; everything else runs
+unprivileged, which is what keeps waybar's polling and clicking prompt-free.
+
+**`cap` sets `CAP_START` to `stop - 5` automatically.** Equal start and stop
+would let the SMC nibble at the boundary; the 5-point gap is hysteresis. Edit
+`/etc/powerctl/rules.conf` directly if you want a different spread.
+
+`list` shows **both** the configured rule and the actual sysfs values — they
+diverge when the driver clamps, and silent divergence is the main failure mode
+here. It prints a `WARNING` line when they disagree.
+
+### Two independent switches
+
+Worth being explicit, because it is the one genuinely confusing part of the
+model:
+
+| | Set by | Means |
+|---|---|---|
+| **which rule** | `cap` / `health` / `off` | what the thresholds *would* be |
+| **enforcement** | `toggle`, or `systemctl start/stop powerctl.service` | whether they are applied right now |
+
+So `powerctl off` is not the same as `powerctl toggle`. `off` forgets the rule
+(`ACTIVE=none`); `toggle` keeps it and stops applying it, restoring 100/100
+until you toggle back. The bar shows a distinct "paused" tooltip for that state.
 
 ### The unit
 
@@ -404,7 +428,7 @@ powerctl cap 80          # or: powerctl health
 powerctl list
 ```
 
-`uninstall.sh` restores 100/100 *before* removing anything, so a cap can't
+`make uninstall` restores 100/100 *before* removing anything, so a cap can't
 outlive the tool that explains it.
 
 ### Verified so far
