@@ -15,6 +15,14 @@ command -v systemctl >/dev/null && \
 command -v dbus-update-activation-environment >/dev/null && \
 	dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE
 
+# terminal server. Super+Shift+Return spawns `footclient`, which opens a window
+# on this process rather than starting a terminal from scratch -- one font-set
+# load and one config parse for the whole session. Started here rather than via
+# the shipped foot-server.socket so it inherits dwl's full environment; the unit
+# is left disabled to avoid two servers racing for %t/foot.sock.
+# Caveat of server mode: if this process dies, every terminal dies with it.
+command -v foot >/dev/null && foot --server &
+
 # wallpaper (solid color fallback if swaybg missing)
 command -v swaybg >/dev/null && swaybg -c '#222222' &
 
