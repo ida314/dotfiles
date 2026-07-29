@@ -8,6 +8,7 @@ A small CLI for power rules on the M2 Air (Mac14,2, Asahi Fedora):
 - **health** — derive a target percentage from the battery's measured state and
   hold there
 - **idle** — screen-off and system-sleep timeouts, set per power source
+- **lid** — whether closing the lid sleeps, set per power source
 - `powerctl list` — view rules and which one is in effect
 
 ## Shape: standalone project, not a single script
@@ -173,6 +174,7 @@ Source of truth is `~/.dotfiles/powerctl/`; `make install` places them.
 | `/etc/systemd/system/powerctl-refresh.{service,timer}` | ″ | weekly recompute for the health rule |
 | `/etc/polkit-1/rules.d/49-powerctl.rules` | `polkit/` | wheel manages these units, no password |
 | `~/.config/powerctl/idle.conf` | `config/idle.conf` | idle rules (user) |
+| `/etc/systemd/logind.conf.d/50-powerctl-lid.conf` | *generated* | lid rules; removed by `make uninstall` |
 | `~/.config/systemd/user/swayidle.service` | `systemd/user/` | symlinked; swayidle, moved out of `startup.sh` |
 | `~/.local/state/powerctl/swayidle-cmd.sh` | *generated* | swayidle command line, not tracked |
 
@@ -210,9 +212,14 @@ powerctl off                  # restore 100/100                      [sudo]
 powerctl apply [--restore]    # re-apply current rule (used by unit/timer)
 
 powerctl idle                 # effective screen/sleep timeouts per source
+powerctl idle set screen 15m  # no source given -> both
 powerctl idle set bat screen 3m
 powerctl idle set ac sleep never
 powerctl idle apply           # regenerate swayidle command and restart it
+
+powerctl lid                  # what closing the lid does, per source
+powerctl lid off              # lid close never sleeps                 [sudo]
+powerctl lid ac off           # ...only on AC (clamshell)              [sudo]
 ```
 
 Commands marked `[sudo]` re-exec themselves under sudo; everything else runs
@@ -346,6 +353,46 @@ swayidle only restarts when the *config* changes, which is rare and explicit.
 
 `0` means never: simply don't register that timeout.
 
+### Sleep has precedence over screen
+
+The two rules are not independent — one can make the other unreachable. Three
+cases, and only the first is well-behaved:
+
+| | |
+|---|---|
+| `screen < sleep` | both fire, in order. The intended arrangement. |
+| `screen == sleep` | a **race**: `wlopm --off; dwl-lock` against `systemctl suspend`, order unspecified. |
+| `screen > sleep` | the screen rule is **dead config** — the machine is already asleep when it comes due. |
+
+Resolve both to the same rule: **sleep wins.** When a `screen` timeout fires,
+the handler no-ops if the live source's sleep timeout is set and is at or before
+it. Nothing is lost by doing so — suspending blanks the display anyway, and
+swayidle's `before-sleep` hook has already run `dwl-lock`.
+
+**With one exception, and it is the reason the handler reads the flag file.**
+`dwl-suspend-toggle`'s `no-suspend` override makes the sleep handler a no-op. If
+the screen rule were suppressed unconditionally, that combination would leave an
+idle session awake, lit, and **unlocked** — strictly worse than either rule
+alone. So the suppression is conditional on suspend actually being live, and
+while the override holds, a shadowed screen rule comes back.
+
+This belongs in the handler, not in `gen_idle_cmd`, for the same reason the
+power-source gating does: a shadowed screen timeout may still be the live one
+for the *other* source, so it must stay registered. Registration is the union;
+every decision happens at fire time.
+
+Dead config should not be silent, so `powerctl idle` marks the pair and
+`powerctl idle set` warns after a change that creates one. Neither refuses —
+"sleep, and never mind the screen" is a legitimate thing to want.
+
+### Durations take a mandatory unit
+
+`parse_dur` rejects a bare number rather than picking a meaning for it. Read as
+seconds, `30` blanks the screen half a minute in; read as minutes it does
+nothing for half an hour. Both are plausible enough that the wrong guess is not
+obviously wrong from the outside, which is the case where erroring beats
+defaulting. `45s`/`5m`/`1h`/`never` only, plus `off`, `none` and `always`.
+
 ### Wiring
 
 Move the invocation out of `startup.sh` into a **user unit**, `swayidle.service`,
@@ -372,13 +419,62 @@ Accept `30s`/`5m`/`1h`/`never`, store seconds.
 
 **Keyboard input cannot wake s2idle on this Asahi kernel** — waking needs the
 lid or power button. A short `IDLE_BAT_SLEEP` is therefore more disruptive here
-than on a typical laptop. Keep the sleep timeout comfortably longer than the
-screen-off timeout, and treat `IDLE_BAT_SLEEP=0` as a legitimate everyday
-setting rather than a degenerate one.
+than on a typical laptop, and `IDLE_BAT_SLEEP=0` is a legitimate everyday
+setting rather than a degenerate one. Keeping the sleep timeout longer than the
+screen-off timeout is no longer just advice — the precedence rule above makes
+the alternative do something definite instead of something racy.
 
-Also note `logind.conf` is entirely at defaults (`IdleAction=ignore`), so it is
-not currently a competing writer — but `HandleLidSwitch` and `IdleAction` are a
-third potential source of sleep policy if ever set.
+`IdleAction` stays at its default (`ignore`), so logind is not a competing
+source of *idle* sleep policy. It is now the deliberate owner of lid policy —
+see below.
+
+## Lid rules (the third enforcer)
+
+Closing the lid is not swayidle's to handle and never was: it is logind's, via
+`HandleLidSwitch`. So `powerctl lid` is a third enforcement mechanism alongside
+firmware-enforced thresholds and daemon-enforced timeouts, and it is the most
+pleasant of the three to drive.
+
+**Why this half is easy where the idle half was hard.** Two properties of
+logind do all the work:
+
+- `Type=notify-reload` — `systemctl reload systemd-logind` makes it re-read its
+  config in place. No restart, no dropped session, none of swayidle's
+  "timeouts are fixed at launch" problem.
+- The effective policy is published on D-Bus (`org.freedesktop.login1.Manager`,
+  properties `HandleLidSwitch` / `HandleLidSwitchExternalPower`).
+
+The second is the important one: **there is no shadow copy of this setting and
+therefore nothing to drift.** The drop-in is the config, logind is the source of
+truth, and `powerctl lid` reads the live values back rather than echoing what it
+wrote. Contrast the charging half, where `list` has to compare intent against
+sysfs and warn. Here a mismatch after writing can only mean the reload failed or
+another drop-in outranks ours, and `lid` says so.
+
+```ini
+# /etc/systemd/logind.conf.d/50-powerctl-lid.conf   (generated)
+[Login]
+HandleLidSwitch=suspend               # on battery
+HandleLidSwitchExternalPower=ignore   # on AC -- clamshell
+```
+
+logind's own AC/battery split maps exactly onto the `ac`/`bat`/`both` grammar
+the idle rules already use, so the CLI shape carries over for free. Both keys
+are always written, never just the one being changed: an unset
+`HandleLidSwitchExternalPower` *inherits* `HandleLidSwitch`, and a generated
+file that leans on inheritance is a file whose meaning changes when you edit an
+unrelated line.
+
+**`HandleLidSwitchDocked` is left alone**, at its default `ignore`. It is worth
+knowing about rather than managing: logind counts "an external display is
+attached" as docked, so in that state the lid is ignored no matter what the
+above says. That is almost always the behaviour you want, and it is also the
+most likely reason for someone to conclude the setting is broken — so
+`powerctl lid` prints it.
+
+`make uninstall` removes the drop-in and reloads logind, on the same principle
+as restoring 100/100: a lid policy set by powerctl must not outlive the tool
+that explains why closing the lid does nothing.
 
 ## Worthwhile extensions
 

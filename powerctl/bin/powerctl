@@ -12,6 +12,12 @@
 set -eu
 
 CONF=/etc/powerctl/rules.conf
+
+# systemd starts system services with no HOME, and the charging half never needs
+# one -- so an unset HOME must not abort the script here, before `apply` has even
+# run. Defaulting it to empty keeps every later expansion safe under `set -u`;
+# the idle commands, which genuinely need a real home, check for it themselves.
+HOME=${HOME:-}
 IDLE_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/powerctl/idle.conf"
 IDLE_CMD="${XDG_STATE_HOME:-$HOME/.local/state}/powerctl/swayidle-cmd.sh"
 
@@ -19,6 +25,13 @@ PROG=${0##*/}
 
 die()  { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
 warn() { printf '%s: %s\n' "$PROG" "$*" >&2; }
+
+# The idle half writes into the user's home and bakes an absolute path to
+# dwl-lock into the generated command, so it cannot proceed with HOME unset.
+require_home() {
+    [ -n "$HOME" ] ||
+        die "idle rules need HOME set -- run as your user, not from a system service"
+}
 
 # ---------------------------------------------------------------- discovery
 
@@ -188,14 +201,24 @@ cmd_apply() {
 
 # ------------------------------------------------------------------ duration
 
+# A unit is mandatory. A bare number is rejected rather than guessed at: read as
+# seconds it blanks the screen half a minute in, read as minutes it does nothing
+# for half an hour, and neither reading is obviously wrong from the outside.
 parse_dur() {
     case $1 in
-        never|off|none) echo 0 ;;
-        *h) echo $(( ${1%h} * 3600 )) ;;
-        *m) echo $(( ${1%m} * 60 )) ;;
-        *s) echo "${1%s}" ;;
-        *[!0-9]*) die "bad duration: $1 (use 30s, 5m, 1h, never)" ;;
-        *) echo "$1" ;;
+        never|off|none|always) echo 0; return 0 ;;
+    esac
+
+    # Split the trailing unit from the magnitude and validate both, so junk like
+    # `5xh` gives a duration error rather than a raw arithmetic one.
+    _u=${1#"${1%?}"} _n=${1%?}
+    case $_n in ''|*[!0-9]*) die "bad duration: $1 (use 45s, 5m, 1h, or never)" ;; esac
+
+    case $_u in
+        h) echo $(( _n * 3600 )) ;;
+        m) echo $(( _n * 60 )) ;;
+        s) echo "$_n" ;;
+        *) die "bad duration: $1 (use 45s, 5m, 1h, or never)" ;;
     esac
 }
 
@@ -205,6 +228,27 @@ fmt_dur() {
     elif [ $(( $1 % 60 ))   -eq 0 ]; then echo "$(( $1 / 60 ))m"
     else                                  echo "${1}s"
     fi
+}
+
+# Sleep has precedence: when a source suspends at or before its own screen
+# timeout, the suspend owns the idle period and the screen rule never runs --
+# suspending blanks the display anyway, and swayidle's before-sleep hook has
+# already locked. powerctl-idle-action enforces this; the reporting below exists
+# so a screen rule that can never fire is visible rather than silently dead.
+shadowed() { # screen sleep
+    [ "$2" -gt 0 ] && [ "$2" -le "$1" ]
+}
+
+_warn_shadow_one() { # label screen sleep
+    shadowed "$2" "$3" || return 0
+    warn "$1: suspend at $(fmt_dur "$3") pre-empts the $(fmt_dur "$2") screen timeout -- the screen rule never fires"
+}
+
+# Not an error -- hand-tuning freely is the point, and this is a legitimate
+# setting if you only ever wanted the machine to sleep.
+warn_shadow() {
+    _warn_shadow_one 'on AC'   "$IDLE_AC_SCREEN"  "$IDLE_AC_SLEEP"
+    _warn_shadow_one 'battery' "$IDLE_BAT_SCREEN" "$IDLE_BAT_SLEEP"
 }
 
 # --------------------------------------------------------------------- idle
@@ -226,6 +270,9 @@ gen_idle_cmd() {
             set -- $_spec
             _kind=$1 _secs=$2
             [ "$_secs" -gt 0 ] || continue
+            # A screen timeout shadowed by sleep is still registered: the same
+            # number may be live for the other power source, and the handler
+            # is where that gets decided.
             # dedupe: same kind+timeout registered twice would fire twice
             case " ${_seen:-} " in *" $_kind:$_secs "*) continue ;; esac
             _seen="${_seen:-} $_kind:$_secs"
@@ -249,33 +296,194 @@ gen_idle_cmd() {
     chmod +x "$IDLE_CMD"
 }
 
+idle_row() { # label screen sleep
+    if shadowed "$2" "$3"; then
+        printf '  %-10s %-10s %-10s%s\n' "$1" "$(fmt_dur "$2")" "$(fmt_dur "$3")" \
+               '<- screen rule never fires'
+    else
+        printf '  %-10s %-10s %s\n' "$1" "$(fmt_dur "$2")" "$(fmt_dur "$3")"
+    fi
+}
+
 cmd_idle() {
     case ${1:-show} in
     show)
         printf 'idle rules   (live source: %s)\n\n' "$(on_ac && echo AC || echo battery)"
-        printf '  %-10s %-10s %-10s\n' '' 'screen' 'sleep'
-        printf '  %-10s %-10s %-10s\n' 'on AC'   "$(fmt_dur "$IDLE_AC_SCREEN")"  "$(fmt_dur "$IDLE_AC_SLEEP")"
-        printf '  %-10s %-10s %-10s\n' 'battery' "$(fmt_dur "$IDLE_BAT_SCREEN")" "$(fmt_dur "$IDLE_BAT_SLEEP")"
+        printf '  %-10s %-10s %s\n' '' 'screen' 'sleep'
+        idle_row 'on AC'   "$IDLE_AC_SCREEN"  "$IDLE_AC_SLEEP"
+        idle_row 'battery' "$IDLE_BAT_SCREEN" "$IDLE_BAT_SLEEP"
+
+        _any_shadow=no
+        shadowed "$IDLE_AC_SCREEN"  "$IDLE_AC_SLEEP"  && _any_shadow=yes
+        shadowed "$IDLE_BAT_SCREEN" "$IDLE_BAT_SLEEP" && _any_shadow=yes
+        if [ "$_any_shadow" = yes ]; then
+            printf '\n  sleep has precedence: the system suspends at or before the screen\n'
+            printf '  timeout, so the screen rule never runs. Give sleep the longer\n'
+            printf '  timeout of the two if you want both.\n'
+        fi
+
         if [ -e "$HOME/.local/state/dwl/no-suspend" ]; then
             printf '\n  override: idle suspend OFF (dwl-suspend-toggle)\n'
+            [ "$_any_shadow" = yes ] &&
+                printf '            while it holds, shadowed screen rules DO fire\n'
         fi
         ;;
     set)
-        [ $# -eq 4 ] || die "usage: $PROG idle set <ac|bat> <screen|sleep> <duration>"
-        case $2 in ac|bat) ;; *) die "expected 'ac' or 'bat', got: $2" ;; esac
-        case $3 in screen|sleep) ;; *) die "expected 'screen' or 'sleep', got: $3" ;; esac
-        _key="IDLE_$(echo "$2" | tr '[:lower:]' '[:upper:]')_$(echo "$3" | tr '[:lower:]' '[:upper:]')"
-        _val=$(parse_dur "$4")
-        set_key "$IDLE_CONF" "$_key" "$_val"
+        require_home
+        # Three forms. Omitting the source sets both, since "screen off after
+        # 15 minutes" is usually a single intent rather than two.
+        case $# in
+        3)  case $2 in
+                ac|bat|both|all)
+                    die "usage: $PROG idle set $2 <screen|sleep> <duration>" ;;
+            esac
+            _srcs='ac bat' _what=$2 _dur=$3
+            ;;
+        4)  case $2 in
+                ac|bat)   _srcs=$2 ;;
+                both|all) _srcs='ac bat' ;;
+                *) die "expected 'ac', 'bat' or 'both', got: $2" ;;
+            esac
+            _what=$3 _dur=$4
+            ;;
+        *)  die "usage: $PROG idle set [ac|bat|both] <screen|sleep> <45s|5m|1h|never>" ;;
+        esac
+        case $_what in screen|sleep) ;; *) die "expected 'screen' or 'sleep', got: $_what" ;; esac
+
+        _val=$(parse_dur "$_dur")
+        _field=$(echo "$_what" | tr '[:lower:]' '[:upper:]')
+        for _s in $_srcs; do
+            _key="IDLE_$(echo "$_s" | tr '[:lower:]' '[:upper:]')_$_field"
+            set_key "$IDLE_CONF" "$_key" "$_val"
+            # Keep the in-memory copy in step. gen_idle_cmd reads these
+            # variables, not the file, so without this it would regenerate
+            # swayidle from the values sourced at startup -- writing the new
+            # timeout to disk while quietly still enforcing the old one.
+            eval "$_key=\$_val"
+            printf '%s = %s\n' "$_key" "$(fmt_dur "$_val")"
+        done
         cmd_idle apply
-        printf '%s = %s\n' "$_key" "$(fmt_dur "$_val")"
+        warn_shadow
         ;;
     apply)
+        require_home
         gen_idle_cmd
         systemctl --user restart swayidle.service 2>/dev/null ||
             warn "could not restart swayidle.service (not installed yet?)"
         ;;
     *) die "unknown idle subcommand: $1" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------- lid
+
+# The lid is logind's, not swayidle's -- a third enforcer with its own config
+# and its own privilege domain. Two things make this tractable: logind is
+# Type=notify-reload, so a change applies on `systemctl reload` without
+# restarting it and disturbing the session; and it publishes the live policy on
+# D-Bus, so there is no need to keep a shadow copy in rules.conf and no way for
+# one to drift. The drop-in is the config; logind is the source of truth.
+LID_CONF=/etc/systemd/logind.conf.d/50-powerctl-lid.conf
+
+lid_prop() { # property -> value, empty if unset
+    command -v busctl >/dev/null || return 1
+    busctl get-property org.freedesktop.login1 /org/freedesktop/login1 \
+           org.freedesktop.login1.Manager "$1" 2>/dev/null | awk -F'"' '{print $2}'
+}
+
+# Prints "ac bat". An unset HandleLidSwitchExternalPower means "same as
+# HandleLidSwitch", so resolve the inheritance here rather than reporting blank.
+lid_live() {
+    _b=$(lid_prop HandleLidSwitch) || return 1
+    [ -n "$_b" ] || return 1
+    _a=$(lid_prop HandleLidSwitchExternalPower)
+    [ -n "$_a" ] || _a=$_b
+    printf '%s %s\n' "$_a" "$_b"
+}
+
+# logind takes more actions than powerctl sets (lock, hibernate, poweroff...).
+# Anything we did not write is echoed verbatim instead of forced into on/off.
+lid_word() {
+    case $1 in
+        suspend) echo 'sleeps' ;;
+        ignore)  echo 'stays awake' ;;
+        *)       echo "$1" ;;
+    esac
+}
+
+cmd_lid() {
+    case ${1:-show} in
+    show)
+        if ! _l=$(lid_live); then
+            printf 'lid close    unavailable (cannot reach logind)\n'
+            return 0
+        fi
+        # shellcheck disable=SC2086
+        set -- $_l
+        printf 'lid close\n\n'
+        printf '  %-10s %s\n' 'on AC'   "$(lid_word "$1")"
+        printf '  %-10s %s\n' 'battery' "$(lid_word "$2")"
+
+        # Easy to miss, and it makes a configured "sleeps" look broken: with an
+        # external display attached, logind treats the machine as docked and
+        # this setting is bypassed entirely.
+        _d=$(lid_prop HandleLidSwitchDocked) || _d=
+        if [ "${_d:-ignore}" = ignore ]; then
+            printf '\n  with an external display attached, lid close is ignored\n'
+            printf '  regardless of the above (logind HandleLidSwitchDocked=%s)\n' \
+                   "${_d:-ignore}"
+        fi
+        ;;
+    *)
+        case $# in
+        1)  _srcs='ac bat' _act=$1 ;;
+        2)  case $1 in
+                ac|bat)   _srcs=$1 ;;
+                both|all) _srcs='ac bat' ;;
+                *) die "expected 'ac', 'bat' or 'both', got: $1" ;;
+            esac
+            _act=$2
+            ;;
+        *)  die "usage: $PROG lid [ac|bat|both] <on|off>" ;;
+        esac
+        case $_act in
+            on|sleep|suspend)  _act=suspend ;;
+            off|ignore|never)  _act=ignore ;;
+            *) die "expected 'on' or 'off', got: $_act" ;;
+        esac
+
+        need_root lid "$@"
+
+        # Rewrite both keys from the live pair, so the drop-in always states the
+        # whole policy and never leans on logind's inheritance rules.
+        _cur=$(lid_live) || die "cannot read current lid policy from logind"
+        # shellcheck disable=SC2086
+        set -- $_cur
+        _ac=$1 _bat=$2
+        for _s in $_srcs; do
+            case $_s in ac) _ac=$_act ;; bat) _bat=$_act ;; esac
+        done
+
+        mkdir -p "${LID_CONF%/*}"
+        {
+            printf '# Generated by powerctl -- do not edit.\n'
+            printf '# Change with: powerctl lid [ac|bat|both] <on|off>\n'
+            printf '[Login]\n'
+            printf 'HandleLidSwitch=%s\n' "$_bat"
+            printf 'HandleLidSwitchExternalPower=%s\n' "$_ac"
+        } > "$LID_CONF"
+
+        systemctl reload systemd-logind ||
+            warn "could not reload systemd-logind; the new policy applies at next boot"
+
+        # A drop-in sorting after ours would silently outrank it.
+        _new=$(lid_live) || _new=
+        if [ -n "$_new" ] && [ "$_new" != "$_ac $_bat" ]; then
+            warn "logind reports '$_new', not '$_ac $_bat' --" \
+                 "another drop-in may outrank $LID_CONF"
+        fi
+        cmd_lid show
+        ;;
     esac
 }
 
@@ -306,6 +514,8 @@ cmd_list() {
 
     printf '\n'
     cmd_idle show
+    printf '\n'
+    cmd_lid show
 }
 
 # Whether the rule is currently being enforced, as opposed to merely configured.
@@ -367,6 +577,7 @@ usage() {
     cat <<EOF
 usage: $PROG <command>
 
+charging
   list                       all rules, live values, drift warnings
   status [--waybar]          one-line summary; --waybar emits JSON
   toggle                     pause/resume enforcement (waybar on-click)
@@ -375,9 +586,25 @@ usage: $PROG <command>
   off                        restore 100/100
   apply [--restore]          re-apply current rule (used by systemd)
 
+idle timeouts                                              [swayidle]
   idle                       show screen/sleep timeouts per power source
-  idle set <ac|bat> <screen|sleep> <30s|5m|1h|never>
+  idle set <screen|sleep> <duration>                 both power sources
+  idle set <ac|bat|both> <screen|sleep> <duration>
   idle apply                 regenerate swayidle command and restart it
+
+  duration is 45s, 5m, 1h, or never (aliases: off, none, always).
+  A bare number is rejected -- the unit is never guessed.
+
+  Sleep has precedence: if a source suspends at or before its own screen
+  timeout, the screen rule never fires. \`$PROG idle\` flags that.
+
+lid close                                                    [logind]
+  lid                        show what closing the lid does, per source
+  lid <on|off>                                       both power sources
+  lid <ac|bat|both> <on|off>       on = suspend, off = stay awake  [sudo]
+
+  Bypassed while an external display is attached -- logind treats that
+  as docked and ignores the lid either way.
 EOF
 }
 
@@ -389,6 +616,7 @@ status) shift; cmd_status "$@" ;;
 toggle) cmd_toggle ;;
 apply)  shift; cmd_apply "$@" ;;
 idle)   shift; cmd_idle "$@" ;;
+lid)    shift; cmd_lid "$@" ;;
 
 cap)
     [ $# -eq 2 ] || die "usage: $PROG cap <percent>"

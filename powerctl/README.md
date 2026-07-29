@@ -33,15 +33,55 @@ forgetting the rule. So `off` clears it, `toggle` suspends it.
 
 ```sh
 powerctl idle                        # current timeouts, and which source is live
-powerctl idle set bat screen 3m      # screen off after 3 min on battery
+powerctl idle set screen 15m         # screen off after 15 min on both sources
+powerctl idle set bat screen 3m      # ...or just on battery
 powerctl idle set ac sleep never     # never auto-suspend while plugged in
 ```
 
-Takes `45s`, `5m`, `1h`, or `never`. Changes apply immediately — swayidle is
-restarted, but only on a config change, never on plug/unplug.
+Omit the source to set both; `both` says the same thing explicitly.
+
+Takes `45s`, `5m`, `1h`, or `never` (`off`, `none` and `always` are accepted
+too). A bare number is an error — as seconds it blanks the screen half a minute
+in, as minutes it does nothing for half an hour, and guessing wrong is worse
+than asking. Changes apply immediately — swayidle is restarted, but only on a
+config change, never on plug/unplug.
+
+**Sleep wins.** If a source suspends at or before its own screen timeout, the
+screen rule never fires: suspending blanks the display anyway, and the lock has
+already run via `before-sleep`. That also settles what used to be a race when
+the two timeouts were equal. `powerctl idle` marks any pair where the screen
+rule is dead:
+
+```
+             screen     sleep
+  on AC      15m        never
+  battery    15m        10m       <- screen rule never fires
+```
 
 `dwl-suspend-toggle` still works and still wins: it is a *temporary* "not right
-now" override, distinct from configuring `never`.
+now" override, distinct from configuring `never`. While it holds, a shadowed
+screen rule comes back to life — otherwise an idle session would sit awake, lit
+and unlocked.
+
+### Closing the lid
+
+```sh
+powerctl lid                         # what closing the lid does, per source
+powerctl lid off                     # lid close never sleeps
+powerctl lid ac off                  # ...only while plugged in (clamshell)
+powerctl lid bat on                  # still sleep on battery
+```
+
+A different enforcer from the timeouts above: the lid belongs to **logind**, so
+this writes `/etc/systemd/logind.conf.d/50-powerctl-lid.conf` and reloads it
+(`[sudo]`). logind is `Type=notify-reload`, so it applies at once without a
+restart and without disturbing your session. `powerctl lid` reads the live
+policy back over D-Bus rather than echoing the file, so another drop-in
+outranking ours is visible rather than silent.
+
+One thing to know before concluding it's broken: with an external display
+attached, logind treats the machine as docked and ignores the lid regardless of
+this setting.
 
 ### Where things live
 
@@ -49,10 +89,12 @@ now" override, distinct from configuring `never`.
 |---|---|
 | charging rules | `/etc/powerctl/rules.conf` (root) |
 | idle rules | `~/.config/powerctl/idle.conf` (yours, no sudo) |
+| lid rule | `/etc/systemd/logind.conf.d/50-powerctl-lid.conf` (root, generated) |
 | what the bar shows | `powerctl status --waybar` |
 
-Only `cap`, `health`, `off` and `apply` need root; they re-exec under sudo
-themselves. Everything else runs unprivileged so waybar never sees a prompt.
+Only `cap`, `health`, `off`, `apply` and `lid <on|off>` need root; they re-exec
+under sudo themselves. Everything else — including all three *show* commands —
+runs unprivileged so waybar never sees a prompt.
 
 Design notes, hardware findings, and open questions live in
 [`../docs/powerctl.md`](../docs/powerctl.md). Read that before changing the

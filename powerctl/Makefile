@@ -12,6 +12,8 @@ SYSCONFDIR   ?= /etc
 CONFDIR      ?= $(SYSCONFDIR)/powerctl
 UNITDIR      ?= $(SYSCONFDIR)/systemd/system
 POLKITDIR    ?= $(SYSCONFDIR)/polkit-1/rules.d
+LOGINDDIR    ?= $(SYSCONFDIR)/systemd/logind.conf.d
+LIDCONF      ?= $(LOGINDDIR)/50-powerctl-lid.conf
 USERUNITDIR  ?= $(HOME)/.config/systemd/user
 USERCONFDIR  ?= $(HOME)/.config/powerctl
 USERSTATEDIR ?= $(HOME)/.local/state/powerctl
@@ -129,6 +131,14 @@ uninstall: check-not-root uninstall-user uninstall-system
 uninstall-system:
 	@echo '==> restoring charge thresholds to 100/100'
 	-[ -x $(BINDIR)/powerctl ] && $(SUDO) $(BINDIR)/powerctl apply --restore
+	@# Same reasoning: a lid policy set by powerctl must not outlive the tool
+	@# that explains why closing the lid does nothing. Reload, don't restart --
+	@# logind is Type=notify-reload and the session stays up.
+	@if [ -e $(LIDCONF) ]; then \
+	  echo '==> restoring default lid handling'; \
+	  $(SUDO) rm -f $(LIDCONF); \
+	  $(SUDO) systemctl reload systemd-logind || true; \
+	fi
 	@echo '==> disabling and removing system files'
 	-$(SUDO) systemctl disable --now powerctl.service
 	-$(SUDO) systemctl disable powerctl-resume.service powerctl-refresh.timer

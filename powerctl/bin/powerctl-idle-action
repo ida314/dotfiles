@@ -5,6 +5,8 @@
 # apply on the other power source. This handler no-ops unless the timeout that
 # fired is the one configured for the CURRENT source -- which is what lets AC
 # transitions take effect without restarting swayidle and resetting its counter.
+#
+# It also arbitrates between the two rules: sleep has precedence over screen.
 
 set -eu
 
@@ -28,11 +30,19 @@ for d in /sys/class/power_supply/*/; do
     fi
 done
 
-case "$kind:$on_ac" in
-    screen:1) want=$IDLE_AC_SCREEN ;;
-    screen:0) want=$IDLE_BAT_SCREEN ;;
-    sleep:1)  want=$IDLE_AC_SLEEP ;;
-    sleep:0)  want=$IDLE_BAT_SLEEP ;;
+# Both rules for the live source, not just the one that fired: deciding whether
+# the screen rule applies needs to know when this source sleeps.
+if [ "$on_ac" = 1 ]; then
+    screen_want=$IDLE_AC_SCREEN
+    sleep_want=$IDLE_AC_SLEEP
+else
+    screen_want=$IDLE_BAT_SCREEN
+    sleep_want=$IDLE_BAT_SLEEP
+fi
+
+case $kind in
+    screen) want=$screen_want ;;
+    sleep)  want=$sleep_want ;;
     *) exit 0 ;;
 esac
 
@@ -40,15 +50,30 @@ esac
 [ "$fired" = "$want" ] || exit 0
 [ "$want" -gt 0 ] || exit 0
 
+# Temporary override from dwl-suspend-toggle. "Off until I say otherwise" is a
+# different intent from a configured "never", so it stays a separate knob.
+suspend_blocked() { [ -e "$HOME/.local/state/dwl/no-suspend" ]; }
+
 case $kind in
 screen)
+    # Sleep has precedence. If this source suspends at or before the screen
+    # timeout, the suspend owns this idle period and the screen rule has
+    # nothing left to do -- suspending blanks the display anyway, and
+    # swayidle's before-sleep hook has already locked. Equal timeouts would
+    # otherwise race wlopm/dwl-lock against systemctl suspend.
+    #
+    # Unless suspend is being held off, in which case the screen rule is the
+    # only rule still standing and must run, or an idle session would sit
+    # awake, lit, and unlocked.
+    if [ "$sleep_want" -gt 0 ] && [ "$sleep_want" -le "$want" ] &&
+       ! suspend_blocked; then
+        exit 0
+    fi
     wlopm --off '*' 2>/dev/null || true
     exec "$HOME/.local/bin/dwl-lock"
     ;;
 sleep)
-    # Temporary override from dwl-suspend-toggle. "Off until I say otherwise" is
-    # a different intent from a configured "never", so it stays a separate knob.
-    [ -e "$HOME/.local/state/dwl/no-suspend" ] && exit 0
+    suspend_blocked && exit 0
     exec systemctl suspend
     ;;
 esac
