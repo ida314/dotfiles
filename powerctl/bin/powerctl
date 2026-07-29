@@ -163,6 +163,59 @@ upower_guard() {
     fi
 }
 
+# UDEV_LIBDIR is a variable only so the guard below can be exercised against a
+# fixture; nothing sets it in normal use.
+UDEV_LIBDIR=${UDEV_LIBDIR:-/usr/lib/udev/rules.d}
+
+# A udev rule that writes the charge-threshold attributes is the worst kind of
+# competing writer: it re-applies its own stored value on EVERY power_supply
+# uevent, so it reverts whatever powerctl just wrote within milliseconds --
+# including the 100/100 that `off` writes. The symptom is a cap that ignores
+# every command while `list` reports drift.
+#
+# Matched on behaviour rather than package name. Fedora's asahi-battery ships
+# one today, but the failure mode belongs to the mechanism, not the package.
+#
+# Cannot be fixed from here: udev rules are system configuration and disabling
+# one is the user's call, so this only reports. udev collects rules by filename
+# across /etc, /run and /usr/lib and the highest-priority directory wins, so an
+# empty same-named file in /etc neutralises a packaged rule without removing it.
+udev_guard() {
+    [ -d "$UDEV_LIBDIR" ] || return 0
+    _hits=
+    for _f in "$UDEV_LIBDIR"/*.rules; do
+        [ -f "$_f" ] || continue
+        # Assignment only. udev writes with `=` or `:=` and merely tests with
+        # `==` / `!=`, and rules that test these attributes are common and
+        # harmless -- upower's own 60-upower-battery.rules does exactly that.
+        grep -qE 'ATTR\{charge_control_[a-z_]+\}[[:space:]]*:?=[^=]' "$_f" \
+            2>/dev/null || continue
+        _n=${_f##*/}
+        # Shadowed by a higher-priority directory means it never runs.
+        if [ ! -e "/etc/udev/rules.d/$_n" ] && [ ! -e "/run/udev/rules.d/$_n" ]; then
+            _hits="${_hits:+$_hits }$_n"
+        fi
+    done
+    for _n in $_hits; do
+        warn "udev rule $_n also writes the charge thresholds and will revert" \
+             "powerctl on the next power_supply event"
+        warn "  neutralise: sudo touch /etc/udev/rules.d/$_n &&" \
+             "sudo udevadm control --reload"
+    done
+}
+
+# powerdevil ships a root KAuth helper (chargethresholdhelper) that writes the
+# same sysfs files. D-Bus activates it on demand, so it can only interfere while
+# powerdevil itself is running -- in practice, inside a Plasma session. Matched
+# on the full command line because the binary name is longer than the 15
+# characters `comm` keeps.
+powerdevil_guard() {
+    command -v pgrep >/dev/null || return 0
+    pgrep -f org_kde_powerdevil >/dev/null 2>&1 || return 0
+    warn "powerdevil is running and writes the same charge thresholds;" \
+         "turn its charge limit off in Plasma's power settings"
+}
+
 # The driver rejects start > stop, so pick the write order that keeps every
 # intermediate state valid rather than assuming a direction.
 write_thresholds() { # start stop
@@ -180,6 +233,14 @@ write_thresholds() { # start stop
 cmd_apply() {
     [ -n "$BAT" ] || die "no battery with charge-threshold support"
     need_root apply "$@"
+
+    # Report-only guards run on the restore path too. `off` writing 100/100 is
+    # exactly as revertible as a cap, and that is the case that actually bit:
+    # the cap read as disabled everywhere while the hardware stayed pinned.
+    # upower_guard is not here because it *changes* something, and an uninstall
+    # (`apply --restore`) has no business turning off someone else's setting.
+    udev_guard
+    powerdevil_guard
 
     if [ "${1:-}" = --restore ]; then
         set -- 100 100
