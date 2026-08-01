@@ -189,6 +189,13 @@ So the click pauses and resumes; *changing* which rule applies stays a
 deliberate CLI action. `status --waybar` reports three states — no rule set,
 configured-but-paused, and enforced.
 
+**Only "no rule set" may render as empty text.** waybar hides a custom module
+whose text is empty, and the paused state was doing exactly that — so pausing
+from the bar removed the control that un-pauses it, with no way back except the
+CLI. Paused renders `󱞝` + the cap in amber (`.paused`), enforced renders `󱞜` +
+the cap in green (`.on`). Hiding is only correct for the state where clicking
+would do nothing anyway.
+
 The generated swayidle invocation is a **script, not an argument list**: swayidle
 clauses nest quotes (`timeout 180 'powerctl-idle-action screen 180'`), and
 round-tripping that through a systemd `ExecStart=` is a quoting minefield. A
@@ -247,6 +254,24 @@ So `powerctl off` is not the same as `powerctl toggle`. `off` forgets the rule
 (`ACTIVE=none`); `toggle` keeps it and stops applying it, restoring 100/100
 until you toggle back. The bar shows a distinct "paused" tooltip for that state.
 
+**Independent, but not unrelated: choosing a rule also turns enforcement on.**
+`cap`, `health` and `off` change what *should* be applied, so they drive the
+unit — `enforce_on` does `systemctl restart powerctl.service`, `enforce_off`
+does `systemctl stop`, each falling back to a direct `apply` only when the unit
+is not installed. Calling `apply` directly instead, as they first did, wrote the
+thresholds while leaving `is-active` reading inactive — a cap in force that
+three separate consumers reported as off:
+
+- `status --waybar` rendered it as paused, i.e. as nothing at all;
+- `list` warned about drift and told the user to run `apply`;
+- `powerctl-{resume,refresh}.service` are `try-restart`, a no-op on an inactive
+  unit, so the cap was silently dropped on the next resume — the opposite of
+  what those units' own comments claim.
+
+`toggle` deliberately does not use these helpers: it runs unprivileged on
+polkit, so it must never fall through to a path that re-execs `sudo` with no tty
+to prompt on.
+
 ### The unit
 
 ```ini
@@ -302,7 +327,9 @@ New `custom/chargecap` module before `battery`, mirroring `custom/suspend`:
 `return-type: json`, `interval: "once"`, `signal: 9` (8 is taken by
 `custom/suspend`), `on-click` cycling `cap -> health -> off`. The CLI sends
 `pkill -RTMIN+9 -x waybar` after any change. Style: `#custom-chargecap` in the
-shared padding rule, `.on` in green `#98c379`.
+shared padding rule, `.on` in green `#98c379`, `.paused` in amber `#e5c07b` —
+the same amber `custom/suspend` uses for its override, and for the same reason:
+a setting that is configured but not currently in force.
 
 ## Idle rules (screen off + system sleep)
 

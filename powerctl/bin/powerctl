@@ -551,7 +551,15 @@ cmd_lid() {
 # ------------------------------------------------------------------- output
 
 cmd_list() {
-    printf 'charging rules   (active: %s)\n\n' "$ACTIVE"
+    # "active" here names the selected rule, not whether it is being applied --
+    # two separate switches, and reporting only the first made a rule that had
+    # just been paused from the bar read as if nothing had happened.
+    if [ "$ACTIVE" = none ] || enforced; then
+        printf 'charging rules   (active: %s)\n\n' "$ACTIVE"
+    else
+        printf 'charging rules   (active: %s -- PAUSED, thresholds not applied)\n' "$ACTIVE"
+        printf '                  resume with: %s toggle\n\n' "$PROG"
+    fi
     printf '  cap       start %s%%  stop %s%%\n' "$CAP_START" "$CAP_STOP"
     if _s=$(soh 2>/dev/null); then
         printf '  health    SoH %s%%  ->  start %s%%  stop %s%%   (floor %s, ceiling %s)\n' \
@@ -564,12 +572,23 @@ cmd_list() {
             "$(cat "$BAT/charge_control_start_threshold")" \
             "$(cat "$BAT/charge_control_end_threshold")" \
             "$(cat "$BAT/capacity")" "$(cat "$BAT/status")"
-        # Configured and live diverging is the main silent failure mode here.
-        # shellcheck disable=SC2046
-        set -- $(effective_thresholds)
+        # Configured and live diverging is the main silent failure mode here --
+        # but the rule is only what the hardware *should* read while enforcement
+        # is on. Paused, 100/100 is the correct reading, and comparing against
+        # the rule anyway told the user to run `powerctl apply`, which silently
+        # re-applies the rule they had just paused.
+        if enforced; then
+            # shellcheck disable=SC2046
+            set -- $(effective_thresholds)
+            _why="live values do not match the rule ($1/$2) -- run: $PROG apply"
+        else
+            set -- 100 100
+            _why="live values do not match the paused state (100/100) -- run:"
+            _why="$_why $PROG toggle to resume the rule, or $PROG apply --restore"
+        fi
         if [ "$(cat "$BAT/charge_control_start_threshold")" != "$1" ] ||
            [ "$(cat "$BAT/charge_control_end_threshold")" != "$2" ]; then
-            printf '  WARNING   live values do not match rule (%s/%s) -- run: powerctl apply\n' "$1" "$2"
+            printf '  WARNING   %s\n' "$_why"
         fi
     fi
 
@@ -579,23 +598,78 @@ cmd_list() {
     cmd_lid show
 }
 
+UNIT=powerctl.service
+
 # Whether the rule is currently being enforced, as opposed to merely configured.
 # The unit's active state is the on/off switch -- see docs/powerctl.md.
-enforced() { systemctl is-active --quiet powerctl.service 2>/dev/null; }
+enforced() { systemctl is-active --quiet "$UNIT" 2>/dev/null; }
+
+have_unit() {
+    command -v systemctl >/dev/null 2>&1 || return 1
+    systemctl cat "$UNIT" >/dev/null 2>&1
+}
+
+# Every command that changes what *should* be enforced goes through the unit, so
+# that the switch keeps telling the truth. Writing sysfs directly instead leaves
+# the thresholds genuinely in force while `is-active` still reads inactive, and
+# three things read that bit:
+#
+#   - `status --waybar`, which then reports a live cap as paused;
+#   - `list`, which then warns about drift that is not drift;
+#   - powerctl-{resume,refresh}.service, both `try-restart` -- a no-op on an
+#     inactive unit, so a cap set outside systemd was silently dropped on the
+#     next resume.
+#
+# `toggle` deliberately does NOT use these: it runs unprivileged and relies on
+# polkit, so it must never fall back to a path that re-execs sudo.
+enforce_on() {
+    if have_unit; then
+        # cmd_apply runs inside the unit from here, so its competing-writer
+        # warnings would only reach the journal. Repeat the report-only ones on
+        # the terminal the user is actually looking at.
+        udev_guard
+        powerdevil_guard
+        # restart, not start: re-runs ExecStart when the unit is already active,
+        # which is the usual case when only the rule changed.
+        if systemctl restart "$UNIT"; then
+            return 0
+        fi
+        warn "could not start $UNIT -- applying directly;" \
+             "enforcement will still read as paused"
+    fi
+    cmd_apply
+}
+
+enforce_off() {
+    if have_unit && enforced; then
+        udev_guard
+        powerdevil_guard
+        if systemctl stop "$UNIT"; then   # ExecStop restores 100/100
+            return 0
+        fi
+        warn "could not stop $UNIT -- restoring 100/100 directly"
+    fi
+    cmd_apply --restore
+}
 
 cmd_status() {
     if [ "${1:-}" = --waybar ]; then
+        # waybar hides a custom module whose text is empty. That is the right
+        # answer for "no rule set" and the wrong one for "paused": a hidden
+        # module cannot be clicked, and clicking is the only way back from a
+        # pause, so pausing from the bar used to remove the control that
+        # un-pauses it. Paused renders too -- open padlock, amber.
         if [ "$ACTIVE" = none ]; then
             printf '{"text":"","tooltip":"No charging rule set\\nRun: powerctl cap 80","class":"off"}\n'
-        elif ! enforced; then
-            # shellcheck disable=SC2046
-            set -- $(effective_thresholds)
-            printf '{"text":"","tooltip":"Charge rule paused (%s: %s%%/%s%%)\\nClick to resume","class":"off"}\n' \
-                "$ACTIVE" "$1" "$2"
+            return 0
+        fi
+        # shellcheck disable=SC2046
+        set -- $(effective_thresholds)
+        if enforced; then
+            printf '{"text":"󱞜 %s","tooltip":"Charge rule: %s\\nResumes below %s%%, stops at %s%%\\nClick to pause","class":"on"}\n' \
+                "$2" "$ACTIVE" "$1" "$2"
         else
-            # shellcheck disable=SC2046
-            set -- $(effective_thresholds)
-            printf '{"text":" %s","tooltip":"Charge rule: %s\\nResumes below %s%%, stops at %s%%\\nClick to pause","class":"on"}\n' \
+            printf '{"text":"󱞝 %s","tooltip":"Charge rule PAUSED (%s: %s%%/%s%%)\\nCharging to 100%% until resumed\\nClick to resume","class":"paused"}\n' \
                 "$2" "$ACTIVE" "$1" "$2"
         fi
     else
@@ -689,7 +763,7 @@ cap)
     set_key "$CONF" CAP_START "$_start"
     set_key "$CONF" ACTIVE cap
     ACTIVE=cap CAP_STOP=$2 CAP_START=$_start
-    cmd_apply
+    enforce_on
     refresh_waybar
     printf 'cap: start %s%% stop %s%%\n' "$_start" "$2"
     ;;
@@ -721,7 +795,7 @@ EOF
     need_root health
     set_key "$CONF" ACTIVE health
     ACTIVE=health
-    cmd_apply
+    enforce_on
     refresh_waybar
     cmd_status
     ;;
@@ -730,7 +804,7 @@ off)
     need_root off
     set_key "$CONF" ACTIVE none
     ACTIVE=none
-    cmd_apply --restore
+    enforce_off
     refresh_waybar
     echo "charge rules off (100/100)"
     ;;

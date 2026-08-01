@@ -29,6 +29,17 @@ you want a different spread.
 `powerctl toggle` (the waybar click) pauses and resumes *enforcement* without
 forgetting the rule. So `off` clears it, `toggle` suspends it.
 
+Enforcement is exactly `powerctl.service` being active, and every command that
+changes what should be enforced goes through the unit — `cap` and `health` start
+it, `off` stops it. Writing the thresholds behind systemd's back would leave a
+cap genuinely in force while the unit still reported inactive, which is what the
+bar, `list`, and `powerctl-resume.service` all read.
+
+The bar shows all three states: nothing when no rule is set, a green closed
+padlock and the cap when it is enforced, an amber open padlock when it is
+paused. Paused has to stay visible — clicking the icon is the only way to
+resume, so a hidden one would be a dead end.
+
 ### Idle timeouts
 
 ```sh

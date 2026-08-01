@@ -40,6 +40,8 @@ window#waybar {
 
 #custom-suspend.off { color: #e5c07b; }
 #custom-chargecap.on { color: #98c379; }
+/* configured but not enforced -- amber, same as the suspend override */
+#custom-chargecap.paused { color: #e5c07b; }
 
 #memory.warning   { color: #e5c07b; }
 #memory.critical  { color: #e06c75; }
