@@ -666,7 +666,7 @@ cmd_status() {
         # shellcheck disable=SC2046
         set -- $(effective_thresholds)
         if enforced; then
-            printf '{"text":"󱞜 %s","tooltip":"Charge rule: %s\\nResumes below %s%%, stops at %s%%\\nClick to pause","class":"on"}\n' \
+            printf '{"text":"%s","tooltip":"Charge rule: %s\\nResumes below %s%%, stops at %s%%\\nClick to pause","class":"on"}\n' \
                 "$2" "$ACTIVE" "$1" "$2"
         else
             printf '{"text":"󱞝 %s","tooltip":"Charge rule PAUSED (%s: %s%%/%s%%)\\nCharging to 100%% until resumed\\nClick to resume","class":"paused"}\n' \
