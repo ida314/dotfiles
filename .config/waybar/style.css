@@ -38,6 +38,9 @@ window#waybar {
   padding: 0 10px;
 }
 
+/* recording indicator: red dot, immediately left of the clock */
+#custom-record { color: #e06c75; padding: 0 4px 0 10px; }
+
 #custom-suspend.off { color: #e5c07b; }
 #custom-chargecap.on { color: #98c379; }
 /* configured but not enforced -- amber, same as the suspend override */

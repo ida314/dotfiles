@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Record Screen
+GenericName=Screen Recorder
+Comment=Start a screen recording (region or full screen, with or without mic)
+Exec=/home/dylan/.local/bin/dwl-record menu
+Icon=camera-video
+Terminal=false
+Categories=AudioVideo;Recorder;
+Keywords=record;screencast;capture;video;demo;

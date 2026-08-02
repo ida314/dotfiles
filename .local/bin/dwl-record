@@ -1,0 +1,120 @@
+#!/bin/sh
+# Screen recorder for dwl: a fuzzel menu to start, a red dot in the bar to stop.
+# Backend: wf-recorder + slurp. Raw command reference lives in ~/RECORDING.md.
+# Usage: dwl-record menu|stop|status
+set -eu
+
+dir="${XDG_VIDEOS_DIR:-$HOME/Videos}/Recordings"
+state="$HOME/.local/state/dwl"
+pathfile="$state/recording-path"
+logfile="$state/recording.log"
+
+# Fedora ships ffmpeg-free, which has no libx264 -- and libx264 is wf-recorder's
+# default, so omitting -c makes it fail outright. libopenh264 is Baseline-only
+# and ignores crf/preset; bitrate is the only quality knob. -x yuv420p keeps the
+# result playable in browsers and QuickTime.
+VIDEO="-c libopenh264 -p b=8M -x yuv420p -r 30"
+# Opus-in-MP4 plays as silence in Safari/QuickTime, so force AAC.
+AUDIO="-a -C aac"
+
+recording() { pgrep -x wf-recorder >/dev/null 2>&1; }
+refresh_bar() { pkill -RTMIN+10 -x waybar 2>/dev/null || true; }
+
+notify() {
+	notify-send -a dwl-record -t "$1" \
+		-h string:x-canonical-private-synchronous:record "$2" "$3" 2>/dev/null || true
+}
+
+start() {
+	# $1: geometry ("" for the whole output), $2: extra flags
+	mkdir -p "$dir" "$state"
+	file="$dir/$(date +%Y-%m-%d_%H-%M-%S).mp4"
+
+	# setsid so the recorder outlives this script and the fuzzel that spawned it.
+	# shellcheck disable=SC2086
+	if [ -n "$1" ]; then
+		setsid wf-recorder -g "$1" -f "$file" $VIDEO $2 >"$logfile" 2>&1 &
+	else
+		setsid wf-recorder -f "$file" $VIDEO $2 >"$logfile" 2>&1 &
+	fi
+
+	# wf-recorder can die on a bad codec or a busy output; give it a moment and
+	# report the real reason rather than showing a dot for a process that is gone.
+	sleep 1
+	if ! recording; then
+		notify 6000 "Recording failed" "$(tail -n 2 "$logfile" 2>/dev/null)"
+		exit 1
+	fi
+
+	printf '%s\n' "$file" >"$pathfile"
+	refresh_bar
+	notify 2000 "Recording started" "${file##*/}"
+}
+
+stop() {
+	recording || exit 0
+	pkill -INT -x wf-recorder 2>/dev/null || true
+
+	# SIGINT is what finalizes the mp4 -- wait for the process to actually go
+	# before reporting a path, or the file may still be unplayable.
+	i=0
+	while recording && [ "$i" -lt 50 ]; do
+		sleep 0.1
+		i=$((i + 1))
+	done
+	refresh_bar
+
+	file=$(cat "$pathfile" 2>/dev/null || true)
+	if [ -n "$file" ] && [ -f "$file" ]; then
+		printf '%s' "$file" | wl-copy 2>/dev/null || true
+		notify 4000 "Recording saved" "$(du -h "$file" | cut -f1) — path copied
+$file"
+	else
+		notify 3000 "Recording stopped" "Saved to $dir"
+	fi
+	rm -f "$pathfile"
+}
+
+menu() {
+	if recording; then
+		[ "$(printf 'Stop recording\n' | fuzzel --dmenu --lines 1 --prompt '● ')" ] \
+			&& stop
+		exit 0
+	fi
+
+	choice=$(printf '%s\n' \
+		'Region — no audio' \
+		'Region — with mic' \
+		'Full screen — no audio' \
+		'Full screen — with mic' |
+		fuzzel --dmenu --lines 4 --prompt 'record > ') || exit 0
+	[ -n "$choice" ] || exit 0
+
+	case "$choice" in
+	Region*) geom=$(slurp) || exit 0 ;; # Esc in slurp cancels silently
+	*) geom="" ;;
+	esac
+
+	case "$choice" in
+	*mic) start "$geom" "$AUDIO" ;;
+	*) start "$geom" "" ;;
+	esac
+}
+
+case "${1:-menu}" in
+menu) menu ;;
+stop) stop ;;
+status)
+	if recording; then
+		printf '{"text":"●","tooltip":"Recording — click to stop","class":"recording"}\n'
+	else
+		# Empty text makes waybar hide the module entirely, so the bar is
+		# unchanged when nothing is being recorded.
+		printf '{"text":"","tooltip":"","class":"idle"}\n'
+	fi
+	;;
+*)
+	echo "usage: $0 menu|stop|status" >&2
+	exit 1
+	;;
+esac

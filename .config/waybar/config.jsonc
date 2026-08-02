@@ -5,7 +5,7 @@
   "spacing": 4,
 
   "modules-left": ["dwl/tags", "dwl/window"],
-  "modules-center": ["clock"],
+  "modules-center": ["custom/record", "clock"],
   "modules-right": ["tray", "memory", "custom/powerprofile", "custom/suspend", "network", "bluetooth", "pulseaudio", "backlight", "custom/chargecap", "battery"],
 
   "dwl/tags": {
@@ -19,6 +19,18 @@
   "clock": {
     "format": "{:%a %d %b  %H:%M}",
     "tooltip-format": "<tt><small>{calendar}</small></tt>"
+  },
+
+  // Empty text while idle, so waybar hides it and the bar looks untouched.
+  // Same trick as custom/chargecap. The interval is a self-heal: wf-recorder
+  // can die on its own, and only a poll would notice.
+  "custom/record": {
+    "exec": "~/.local/bin/dwl-record status",
+    "return-type": "json",
+    "interval": 10,
+    "signal": 10,
+    "on-click": "~/.local/bin/dwl-record stop",
+    "tooltip": true
   },
 
   "tray": {
