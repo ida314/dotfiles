@@ -62,21 +62,29 @@ command -v ibus-daemon >/dev/null && ibus-daemon -drR --desktop=dwl &
 #   - plain "dwl" (GLES2) session -> amber overlay fallback (GLES2 drops gamma).
 # This same startup.sh serves both sessions. See ~/README.md section 4.
 
-# Two-stage idle:
-#   3 min  -> lock + screen off (any key/mouse press re-lights it)
-#  10 min  -> system suspend (s2idle) via dwl-idle-suspend, which honors the
-#             no-suspend flag from `dwl-suspend-toggle`. Waking from suspend
-#             needs the power button or lid: the dockchannel-hid driver has no
-#             wakeup support on this Asahi kernel, so keys can't wake s2idle.
-# The lock is hung off before-sleep as well, so lid-close and manual
-# `systemctl suspend` also lock; `-w` makes swayidle hold logind's sleep
-# inhibitor until dwl-lock confirms the lock is up. after-resume re-lights
-# the panel after wake in case the waking keypress isn't seen as activity.
+# Idle timeouts now belong to powerctl, which owns swayidle via the user unit
+# `swayidle.service` and generates its command line from ~/.config/powerctl/
+# idle.conf (`powerctl idle set ...`, `powerctl idle`). Two swayidle instances
+# would race over the same timeouts, so the invocation below MUST stay off --
+# it hardcoded a 3 min screen-off that overrode powerctl's `screen never`.
+# Waking from suspend still needs the power button or lid: the dockchannel-hid
+# driver has no wakeup support on this Asahi kernel, so keys can't wake s2idle.
 # Apps holding an idle inhibitor (dwl supports idle-inhibit-v1, e.g. video
 # players) suppress the timeouts.
-command -v swayidle >/dev/null && swayidle -w \
-	timeout 180 "wlopm --off '*'; $HOME/.local/bin/dwl-lock" \
-	resume "wlopm --on '*'" \
-	timeout 600 "$HOME/.local/bin/dwl-idle-suspend" \
-	before-sleep "$HOME/.local/bin/dwl-lock" \
-	after-resume "wlopm --on '*'" &
+#
+# swayidle.service is WantedBy=graphical-session.target, but nothing ever
+# reaches that target here: dwl is not a systemd-managed session, and the target
+# sets RefuseManualStart so we cannot pull it up by hand either. Left alone the
+# unit just never starts -- enabled, inactive, no journal entries -- and idle
+# screen-off and idle suspend silently do nothing. Start the unit directly; that
+# is also how `powerctl idle apply` drives it. Must come after the
+# import-environment above, or swayidle starts with no WAYLAND_DISPLAY.
+command -v systemctl >/dev/null && \
+	systemctl --user start swayidle.service
+
+# command -v swayidle >/dev/null && swayidle -w \
+# 	timeout 180 "wlopm --off '*'; $HOME/.local/bin/dwl-lock" \
+# 	resume "wlopm --on '*'" \
+# 	timeout 600 "$HOME/.local/bin/dwl-idle-suspend" \
+# 	before-sleep "$HOME/.local/bin/dwl-lock" \
+# 	after-resume "wlopm --on '*'" &
