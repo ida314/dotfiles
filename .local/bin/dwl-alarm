@@ -1,0 +1,189 @@
+#!/bin/sh
+# Alarm clock for dwl: a fuzzel prompt in, a silent mako notification out.
+# Backed by systemd transient timers, so nothing is resident while one waits
+# and a pending alarm survives a suspend (OnCalendar is wall-clock, not
+# monotonic). Nothing here touches waybar.
+# Usage: dwl-alarm menu|set <time> [label]|list|cancel
+set -eu
+
+PREFIX=dwl-alarm
+
+usage() {
+    cat <<'EOF'
+Usage: dwl-alarm menu               fuzzel prompt for time, then label
+       dwl-alarm set <time> [label] set one directly
+       dwl-alarm list               show pending alarms
+       dwl-alarm cancel [unit]      fuzzel picker, or a named unit
+
+Time formats:
+  15:30  3:30pm  9pm  "tomorrow 7am"   next occurrence of that wall clock
+  25m  1h30m  90s                      that far from now
+  25                                   bare number means minutes
+EOF
+}
+
+# Resolve a time spec to an epoch timestamp on stdout.
+when_to_epoch() {
+    spec=$1
+    now=$(date +%s)
+
+    # Relative: one or more <number><unit> pairs, e.g. 90s, 25m, 1h30m.
+    if printf '%s' "$spec" | grep -qE '^([0-9]+[hmsHMS])+$'; then
+        secs=0
+        rest=$spec
+        while [ -n "$rest" ]; do
+            num=${rest%%[hmsHMS]*}
+            unit=$(printf '%s' "$rest" | cut -c "$((${#num} + 1))")
+            rest=$(printf '%s' "$rest" | cut -c "$((${#num} + 2))-")
+            case $unit in
+                h | H) secs=$((secs + num * 3600)) ;;
+                m | M) secs=$((secs + num * 60)) ;;
+                s | S) secs=$((secs + num)) ;;
+            esac
+        done
+        [ "$secs" -gt 0 ] || return 1
+        echo $((now + secs))
+        return 0
+    fi
+
+    # A bare number is minutes -- date(1) would read it as a year.
+    if printf '%s' "$spec" | grep -qE '^[0-9]+$'; then
+        [ "$spec" -gt 0 ] || return 1
+        echo $((now + spec * 60))
+        return 0
+    fi
+
+    # Absolute wall clock. "15:30" at 4pm means 15:30 tomorrow, not an alarm
+    # that fires the instant it is set.
+    t=$(date -d "$spec" +%s 2>/dev/null) || return 1
+    if [ "$t" -le "$now" ]; then
+        t=$(date -d "tomorrow $spec" +%s 2>/dev/null) || return 1
+        [ "$t" -gt "$now" ] || return 1
+    fi
+    echo "$t"
+}
+
+# Pending alarm timers, one unit name per line, soonest first.
+alarm_units() {
+    systemctl --user list-units --type=timer --all --plain --no-legend \
+        "$PREFIX-*.timer" 2>/dev/null | awk '{print $1}' | sort -t- -k3 -n
+}
+
+label_of() {
+    systemctl --user show "$1" -p Description --value 2>/dev/null
+}
+
+# "15:30 today (in 47m) -- Tea" for the unit named on $1.
+describe() {
+    epoch=$(printf '%s' "$1" | sed 's/^.*-//; s/\.timer$//')
+    label=$(label_of "$1")
+    left=$((epoch - $(date +%s)))
+    if [ "$left" -lt 0 ]; then
+        when=overdue
+    elif [ "$left" -lt 3600 ]; then
+        when="in $((left / 60))m"
+    else
+        when="in $((left / 3600))h$(((left % 3600) / 60))m"
+    fi
+    if [ "$(date -d "@$epoch" +%F)" = "$(date +%F)" ]; then
+        day=today
+    else
+        day=$(date -d "@$epoch" '+%a %b %-d')
+    fi
+    printf '%s %s (%s) -- %s\n' "$(date -d "@$epoch" '+%H:%M')" "$day" "$when" "$label"
+}
+
+set_alarm() {
+    spec=$1
+    shift
+    label=${*:-Alarm}
+    epoch=$(when_to_epoch "$spec") || {
+        printf 'dwl-alarm: cannot parse time %s\n' "$spec" >&2
+        notify-send -a Alarm -t 4000 "Alarm not set" "Cannot parse \"$spec\"" 2>/dev/null || true
+        return 1
+    }
+
+    # The epoch names the unit, which keeps it unique and sortable. Two alarms
+    # in the same second are the only clash, so nudge the second one.
+    while systemctl --user cat "$PREFIX-$epoch.timer" >/dev/null 2>&1; do
+        epoch=$((epoch + 1))
+    done
+
+    # RemainAfterElapse=no lets the timer garbage-collect itself once it fires,
+    # so `list` never accumulates spent alarms.
+    systemd-run --user --quiet \
+        --unit="$PREFIX-$epoch" \
+        --description="$label" \
+        --on-calendar="$(date -d "@$epoch" '+%Y-%m-%d %H:%M:%S')" \
+        --timer-property=AccuracySec=1s \
+        --timer-property=RemainAfterElapse=no \
+        notify-send -u critical -a Alarm -i alarm-symbolic \
+        "$label" "$(date -d "@$epoch" '+%H:%M')"
+
+    printf 'Alarm set: %s\n' "$(describe "$PREFIX-$epoch.timer")"
+    notify-send -a Alarm -t 3000 "Alarm set" "$(describe "$PREFIX-$epoch.timer")" 2>/dev/null || true
+}
+
+cancel_unit() {
+    systemctl --user stop "$1" 2>/dev/null || true
+    systemctl --user stop "${1%.timer}.service" 2>/dev/null || true
+    systemctl --user reset-failed "${1%.timer}.service" 2>/dev/null || true
+}
+
+case ${1-menu} in
+    menu)
+        # --prompt-only is fuzzel's free-text box: dmenu mode, but it neither
+        # waits on stdin nor draws a match list.
+        spec=$(fuzzel --dmenu --prompt-only='alarm at> ' \
+            --placeholder='15:30, 9pm, 25m' 2>/dev/null) || exit 0
+        [ -n "$spec" ] || exit 0
+        label=$(fuzzel --dmenu --prompt-only='label> ' \
+            --placeholder='Alarm' 2>/dev/null) || label=
+        set_alarm "$spec" "$label"
+        ;;
+    set)
+        [ $# -ge 2 ] || {
+            usage >&2
+            exit 1
+        }
+        shift
+        set_alarm "$@"
+        ;;
+    list)
+        units=$(alarm_units)
+        [ -n "$units" ] || {
+            echo 'No alarms pending.'
+            exit 0
+        }
+        echo "$units" | while read -r u; do describe "$u"; done
+        ;;
+    cancel)
+        if [ $# -ge 2 ]; then
+            cancel_unit "$2"
+            exit 0
+        fi
+        units=$(alarm_units)
+        [ -n "$units" ] || {
+            notify-send -a Alarm -t 3000 'No alarms pending' 2>/dev/null || true
+            echo 'No alarms pending.'
+            exit 0
+        }
+        # Show the human line, cancel by the unit hidden behind it.
+        pick=$(echo "$units" | while read -r u; do describe "$u"; done |
+            fuzzel --dmenu --prompt='cancel> ' --lines=8 2>/dev/null) || exit 0
+        [ -n "$pick" ] || exit 0
+        n=$(echo "$units" | while read -r u; do describe "$u"; done |
+            grep -nxF "$pick" | head -1 | cut -d: -f1)
+        [ -n "$n" ] || exit 0
+        unit=$(echo "$units" | sed -n "${n}p")
+        cancel_unit "$unit"
+        notify-send -a Alarm -t 3000 'Alarm cancelled' "$pick" 2>/dev/null || true
+        ;;
+    -h | --help | help)
+        usage
+        ;;
+    *)
+        usage >&2
+        exit 1
+        ;;
+esac

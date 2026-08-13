@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Cancel Alarm
+GenericName=Alarm Clock
+Comment=Pick a pending alarm and cancel it
+Exec=/home/dylan/.local/bin/dwl-alarm cancel
+Icon=alarm-symbolic
+Terminal=false
+Categories=Utility;Clock;
+Keywords=alarm;timer;cancel;stop;clock;
