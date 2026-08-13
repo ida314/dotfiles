@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=White Noise
+GenericName=Noise Generator
+Comment=Play pink, brown or white noise for focus and masking
+Exec=/home/dylan/.local/bin/noise menu
+Icon=audio-volume-high
+Terminal=false
+Categories=AudioVideo;Audio;
+Keywords=noise;white;pink;brown;focus;mask;sound;ambient;

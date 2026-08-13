@@ -1,0 +1,115 @@
+#!/bin/sh
+# Pink/brown/white noise for focus and masking, synthesised locally by ffmpeg.
+# No files, no network, no streaming service -- anoisesrc straight into
+# PipeWire's pulse layer for about 1% of a core.
+#
+# Two anoisesrc instances with different seeds are joined to stereo. anoisesrc
+# is mono, and a single mono source fed to both ears images as a point inside
+# your head and gets fatiguing within minutes; independent per-channel noise
+# sounds like a room instead.
+#
+# Playback runs under `systemd-inhibit --what=idle`, because dwl-idle-suspend
+# would otherwise suspend the machine out from under it after 10 minutes. The
+# inhibitor dies with the process, so this never touches the no-suspend flag
+# that dwl-suspend-toggle owns.
+#
+# Usage: noise menu|white|pink|brown|blue|violet|stop|status
+set -eu
+
+VOL=0.35
+COLORS='white pink brown blue violet'
+pidfile="${XDG_RUNTIME_DIR:-/tmp}/noise.pid"
+
+notify() {
+	notify-send -a noise -t 3000 \
+		-h string:x-canonical-private-synchronous:noise "$1" "$2" 2>/dev/null || true
+}
+
+# Echo the live PID, or fail if there isn't one. A pidfile left behind by a
+# crash reads as "not playing" rather than wedging every later start.
+pid() {
+	[ -r "$pidfile" ] || return 1
+	read -r p <"$pidfile" || return 1
+	[ -n "${p:-}" ] || return 1
+	kill -0 "$p" 2>/dev/null || return 1
+	printf '%s\n' "$p"
+}
+
+playing() { pid >/dev/null 2>&1; }
+
+# Internal, invoked via setsid so that $$ is the process-group leader: stop()
+# signals the whole group, because killing systemd-inhibit alone would orphan
+# ffmpeg and leave the noise playing with no way to find it.
+run() {
+	echo $$ >"$pidfile"
+	exec systemd-inhibit --what=idle --who=noise --why='noise playback' \
+		ffmpeg -hide_banner -loglevel error -nostdin \
+		-f lavfi -i "anoisesrc=c=$1:r=48000:a=$VOL:s=1" \
+		-f lavfi -i "anoisesrc=c=$1:r=48000:a=$VOL:s=2" \
+		-filter_complex '[0][1]join=inputs=2:channel_layout=stereo' \
+		-stream_name noise -f pulse default
+}
+
+start() {
+	if playing; then stop; fi
+	setsid "$0" __run "$1" >/dev/null 2>&1 &
+	notify 'Noise' "$1 noise"
+}
+
+stop() {
+	if p=$(pid); then
+		kill -TERM "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null || true
+		# ffmpeg needs a moment to tear the pulse stream down. Wait for it, so
+		# that switching colour can't briefly overlap two streams, then insist.
+		i=0
+		while kill -0 "$p" 2>/dev/null && [ "$i" -lt 40 ]; do
+			sleep 0.05
+			i=$((i + 1))
+		done
+		kill -KILL "-$p" 2>/dev/null || true
+	fi
+	# Belt and braces for a stream orphaned by a crash or a killed pidfile.
+	# Matched on comm=ffmpeg *and* cmdline, so it can never hit anything else.
+	for p in $(pgrep -x ffmpeg 2>/dev/null || true); do
+		grep -qa anoisesrc "/proc/$p/cmdline" 2>/dev/null && kill "$p" 2>/dev/null || true
+	done
+	rm -f "$pidfile"
+}
+
+menu() {
+	if playing; then
+		if [ -n "$(printf 'Stop noise\n' | fuzzel --dmenu --lines 1 --prompt '♪ ')" ]; then
+			stop
+			notify 'Noise' 'Stopped'
+		fi
+		exit 0
+	fi
+
+	# shellcheck disable=SC2086  # deliberate word splitting, one colour per line
+	choice=$(printf '%s\n' $COLORS | fuzzel --dmenu --lines 5 --prompt 'noise > ') || exit 0
+	[ -n "$choice" ] || exit 0
+	start "$choice"
+}
+
+case "${1:-menu}" in
+menu) menu ;;
+white | pink | brown | blue | violet) start "$1" ;;
+stop)
+	stop
+	notify 'Noise' 'Stopped'
+	;;
+status)
+	if playing; then
+		printf '{"text":"♪","tooltip":"Noise playing — click to stop","class":"playing"}\n'
+	else
+		# Empty text makes waybar hide the module, so the bar is unchanged
+		# when nothing is playing.
+		printf '{"text":"","tooltip":"","class":"idle"}\n'
+	fi
+	;;
+__run) run "$2" ;;
+*)
+	echo "usage: ${0##*/} menu|white|pink|brown|blue|violet|stop|status" >&2
+	exit 2
+	;;
+esac

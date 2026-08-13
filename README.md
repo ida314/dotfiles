@@ -28,9 +28,10 @@ Managed as a normal repo (copy in/out); layout follows the bare-repo pattern:
 - **suckless** (`dwm`/`slstatus`/`slock`): drop each `config.h` into its source tree
   and `sudo make clean install` — the binaries aren't tracked here.
 - **powerctl**: `cd powerctl && make install` (as your normal user, not with sudo).
-  Charging rules install inactive; enable with `powerctl cap 80`. Requires
-  commenting out the swayidle line in `~/.config/dwl/startup.sh` — see
-  `docs/powerctl.md`.
+  Charging rules install inactive; enable with `powerctl cap 80`. powerctl owns
+  swayidle via a user unit; the old invocation in `~/.config/dwl/startup.sh` is
+  commented out and must stay that way — two instances race over the same
+  timeouts. See `docs/powerctl.md`.
 - **T2 Mac kernel/hardware, services, group memberships**: see `~/README.md`.
 - **tmux plugins**: `git clone https://github.com/tmux-plugins/tpm ~/.config/tmux/plugins/tpm`
   then `prefix + I`.
@@ -45,17 +46,21 @@ finds them: type a few letters and press Tab.
 
 | Script | What |
 |---|---|
+| `alarm` | Alarm clock: a fuzzel prompt in, a silent mako notification out. |
 | `ansi2ly` | ansi2ly - turn ANSI art (.ANS) into a .dur background sized for ly. |
 | `dwl-brightness` | Screen + keyboard backlight control for dwl with a lightweight mako |
+| `dwl-clock-hide` | Hide/show the clock in both places at once: the waybar clock and gtklock. |
 | `dwl-idle-suspend` | Called by swayidle at the idle-suspend timeout (see ~/.config/dwl/startup.sh). |
 | `dwl-lock` | Lock screen replacement for dwl (replaces omarchy-system-lock / hyprlock) |
 | `dwl-nightlight` | Night-light / "redshift" toggle for dwl, with a mako notification. |
+| `dwl-record` | Screen recorder for dwl: a fuzzel menu to start, a red dot in the bar to stop. |
 | `dwl-screenshot` | Screenshot tool for dwl with a lightweight mako notification. |
 | `dwl-suspend-status` | waybar custom module: show whether idle auto-suspend is enabled |
 | `dwl-suspend-toggle` | Toggle idle auto-suspend on/off. Writes the flag file read by |
 | `dwl-volume` | Volume control for dwl with a lightweight mako notification. |
 | `dwm-session` | — |
 | `macos-key.sh` | macOS-style key translation for Hyprland |
+| `noise` | Pink/brown/white noise for focus and masking, synthesised locally by ffmpeg. |
 | `obsidian-sync-cron.sh` | — |
 | `powerprofile-cycle` | waybar on-click: cycle power-saver -> balanced -> performance -> power-saver |
 | `powerprofile-status` | waybar custom module: show current power profile (tuned-ppd via net.hadess.PowerProfiles) |
