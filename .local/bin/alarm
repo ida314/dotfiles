@@ -1,19 +1,20 @@
 #!/bin/sh
-# Alarm clock for dwl: a fuzzel prompt in, a silent mako notification out.
+# Alarm clock: a fuzzel prompt in, a silent mako notification out.
 # Backed by systemd transient timers, so nothing is resident while one waits
 # and a pending alarm survives a suspend (OnCalendar is wall-clock, not
-# monotonic). Nothing here touches waybar.
-# Usage: dwl-alarm menu|set <time> [label]|list|cancel
+# monotonic). No compositor coupling -- set/list/cancel work from a bare TTY,
+# and only `menu` needs fuzzel.
+# Usage: alarm menu|set <time> [label]|list|cancel
 set -eu
 
-PREFIX=dwl-alarm
+PREFIX=alarm
 
 usage() {
     cat <<'EOF'
-Usage: dwl-alarm menu               fuzzel prompt for time, then label
-       dwl-alarm set <time> [label] set one directly
-       dwl-alarm list               show pending alarms
-       dwl-alarm cancel [unit]      fuzzel picker, or a named unit
+Usage: alarm menu               fuzzel prompt for time, then label
+       alarm set <time> [label] set one directly
+       alarm list               show pending alarms
+       alarm cancel [unit]      fuzzel picker, or a named unit
 
 Time formats:
   15:30  3:30pm  9pm  "tomorrow 7am"   next occurrence of that wall clock
@@ -98,7 +99,7 @@ set_alarm() {
     shift
     label=${*:-Alarm}
     epoch=$(when_to_epoch "$spec") || {
-        printf 'dwl-alarm: cannot parse time %s\n' "$spec" >&2
+        printf 'alarm: cannot parse time %s\n' "$spec" >&2
         notify-send -a Alarm -t 4000 "Alarm not set" "Cannot parse \"$spec\"" 2>/dev/null || true
         return 1
     }
