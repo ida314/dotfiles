@@ -1,0 +1,29 @@
+#!/bin/sh
+# Hide/show the clock in both places at once: the waybar clock and gtklock.
+# Bound to a left click on the waybar clock, where it rides along with waybar's
+# own format-alt toggle — waybar keeps that show/hide state internally, so all
+# this script records is the state gtklock needs. gtklock can only be styled at
+# launch, so dwl-lock reads the flag when it starts the lock screen: the click
+# has to happen before locking, not while locked.
+
+STATE="$HOME/.local/state/dwl/clock-hidden"
+mkdir -p "${STATE%/*}"
+
+case "${1:-toggle}" in
+    toggle)
+        if [ -e "$STATE" ]; then
+            rm -f "$STATE"
+        else
+            touch "$STATE"
+        fi
+        ;;
+    hide)   touch "$STATE" ;;
+    show)   rm -f "$STATE" ;;
+    status)
+        if [ -e "$STATE" ]; then echo hidden; else echo shown; fi
+        ;;
+    *)
+        echo "usage: ${0##*/} [toggle|hide|show|status]" >&2
+        exit 2
+        ;;
+esac

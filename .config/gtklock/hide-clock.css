@@ -1,0 +1,25 @@
+/* Collapses gtklock's built-in clock and date. Loaded by dwl-lock only when
+   dwl-clock-hide says the clock is off; gtklock picks its style at launch and
+   has no runtime toggle.
+
+   The selectors mirror gtklock's own defaults ("window #clock-label" and
+   "window.focused:not(.hidden) #clock-label") rather than the bare ids: at
+   lower specificity the built-in 96pt/32pt rules would win. */
+
+window #clock-label,
+window #date-label,
+window.focused:not(.hidden) #clock-label,
+window.focused:not(.hidden) #date-label {
+  font-size: 0px;
+  opacity: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+}
+
+/* Otherwise the collapsed labels still hold the box open. */
+window #time-box {
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+}

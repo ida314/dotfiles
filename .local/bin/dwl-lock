@@ -7,7 +7,15 @@ if ! pgrep -x gtklock > /dev/null; then
     # (SIGUSR1 from its `locked` handler, 1s timeout). swayidle runs this from
     # before-sleep with `-w`, so blocking here guarantees the screen is locked
     # before suspend proceeds — no unlocked flash on resume.
-    gtklock -d
+    #
+    # The clock toggle (dwl-clock-hide, same click that hides it on the bar) is
+    # read here rather than passed in: gtklock chooses its style at launch and
+    # can't be restyled while running.
+    if [ -e "$HOME/.local/state/dwl/clock-hidden" ]; then
+        gtklock -d -s "$HOME/.config/gtklock/hide-clock.css"
+    else
+        gtklock -d
+    fi
 fi
 
 # Lock 1password if running

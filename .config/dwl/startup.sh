@@ -26,7 +26,10 @@ command -v foot >/dev/null && foot --server &
 # wallpaper (solid color fallback if swaybg missing)
 command -v swaybg >/dev/null && swaybg -c '#222222' &
 
-# status bar
+# status bar. A fresh waybar always starts with the clock shown (format-alt
+# state is internal and resets), so clear the lock screen's copy of that state
+# to match — otherwise the two disagree until the next click.
+"$HOME/.local/bin/dwl-clock-hide" show 2>/dev/null
 command -v waybar >/dev/null && waybar &
 
 # tray applets (NetworkManager wifi menu + Bluetooth) — same backends KDE used

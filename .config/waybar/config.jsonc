@@ -16,8 +16,15 @@
     "max-length": 60
   },
 
+  // Click collapses the clock to a bare icon and back. It can't collapse to
+  // nothing: an empty module is hidden by waybar, leaving nothing to click to
+  // bring it back. format-alt is toggled by a plain left click, no script.
+  // on-click fires on the same click and records the state for gtklock, so one
+  // click hides the clock on the bar and on the lock screen.
   "clock": {
     "format": "{:%a %d %b  %H:%M}",
+    "format-alt": "󰅐",
+    "on-click": "~/.local/bin/dwl-clock-hide toggle",
     "tooltip-format": "<tt><small>{calendar}</small></tt>"
   },
 
