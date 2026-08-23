@@ -1,12 +1,14 @@
 #!/bin/sh
 # Screen recorder for dwl: a fuzzel menu to start, a red dot in the bar to stop.
-# Backend: wf-recorder + slurp. Raw command reference lives in ~/RECORDING.md.
-# Usage: dwl-record menu|stop|status
+# Backend: wf-recorder + slurp for the screen, ffmpeg + v4l2 for the webcam.
+# Raw command reference lives in ~/RECORDING.md.
+# Usage: dwl-record menu|cam [mic]|stop|status
 set -eu
 
 dir="${XDG_VIDEOS_DIR:-$HOME/Videos}/Recordings"
 state="$HOME/.local/state/dwl"
 pathfile="$state/recording-path"
+pidfile="$state/recording-pid"
 logfile="$state/recording.log"
 
 # Fedora ships ffmpeg-free, which has no libx264 -- and libx264 is wf-recorder's
@@ -17,7 +19,36 @@ VIDEO="-c libopenh264 -p b=8M -x yuv420p -r 30"
 # Opus-in-MP4 plays as silence in Safari/QuickTime, so force AAC.
 AUDIO="-a -C aac"
 
-recording() { pgrep -x wf-recorder >/dev/null 2>&1; }
+# Webcam. The internal camera only offers raw nv12, so let ffmpeg negotiate the
+# pixel format and just pin size and rate. 4M is plenty for 720p Baseline. 720p
+# is the default because the file is a quarter the size and a talking head does
+# not need more; 1080p also holds 30fps here (CPU encoding, no hardware encoder
+# on Asahi) if you want it -- DWL_RECORD_CAM_SIZE=1920x1080.
+CAM_DEV="${DWL_RECORD_CAM:-/dev/video0}"
+CAM_SIZE="${DWL_RECORD_CAM_SIZE:-1280x720}"
+CAM_VIDEO="-f v4l2 -video_size $CAM_SIZE -framerate 30 -i $CAM_DEV"
+# Baseline needs the bits; scale the rate with the frame so a 1080p override is
+# not encoded at a 720p budget.
+case "$CAM_SIZE" in
+19* | 14*) CAM_BITRATE="${DWL_RECORD_CAM_BITRATE:-8M}" ;;
+*) CAM_BITRATE="${DWL_RECORD_CAM_BITRATE:-4M}" ;;
+esac
+CAM_ENC="-c:v libopenh264 -b:v $CAM_BITRATE -pix_fmt yuv420p"
+CAM_AUDIO="-f pulse -i default -c:a aac -b:a 128k"
+
+# The webcam recorder is a plain ffmpeg, so it cannot be found by name the way
+# wf-recorder can -- any unrelated ffmpeg (a trim, a convert) would look like a
+# recording in progress. Track its pid instead, and re-check comm so a recycled
+# pid cannot resurrect a dead recording.
+cam_pid() {
+	[ -f "$pidfile" ] || return 1
+	pid=$(cat "$pidfile" 2>/dev/null) || return 1
+	[ -n "$pid" ] || return 1
+	[ "$(cat "/proc/$pid/comm" 2>/dev/null)" = "ffmpeg" ] || return 1
+	printf '%s\n' "$pid"
+}
+screen_recording() { pgrep -x wf-recorder >/dev/null 2>&1; }
+recording() { screen_recording || cam_pid >/dev/null; }
 refresh_bar() { pkill -RTMIN+10 -x waybar 2>/dev/null || true; }
 
 notify() {
@@ -25,10 +56,29 @@ notify() {
 		-h string:x-canonical-private-synchronous:record "$2" "$3" 2>/dev/null || true
 }
 
+new_file() {
+	mkdir -p "$dir" "$state"
+	printf '%s\n' "$dir/$(date +%Y-%m-%d_%H-%M-%S).mp4"
+}
+
+# wf-recorder and ffmpeg can both die on a busy device or a bad codec; give the
+# process a moment and report the real reason rather than showing a dot for
+# something that is already gone.
+settle() {
+	sleep 1
+	if ! recording; then
+		rm -f "$pidfile"
+		notify 6000 "Recording failed" "$(tail -n 2 "$logfile" 2>/dev/null)"
+		exit 1
+	fi
+	printf '%s\n' "$1" >"$pathfile"
+	refresh_bar
+	notify 2000 "Recording started" "${1##*/}"
+}
+
 start() {
 	# $1: geometry ("" for the whole output), $2: extra flags
-	mkdir -p "$dir" "$state"
-	file="$dir/$(date +%Y-%m-%d_%H-%M-%S).mp4"
+	file=$(new_file)
 
 	# setsid so the recorder outlives this script and the fuzzel that spawned it.
 	# shellcheck disable=SC2086
@@ -38,30 +88,38 @@ start() {
 		setsid wf-recorder -f "$file" $VIDEO $2 >"$logfile" 2>&1 &
 	fi
 
-	# wf-recorder can die on a bad codec or a busy output; give it a moment and
-	# report the real reason rather than showing a dot for a process that is gone.
-	sleep 1
-	if ! recording; then
-		notify 6000 "Recording failed" "$(tail -n 2 "$logfile" 2>/dev/null)"
-		exit 1
-	fi
+	settle "$file"
+}
 
-	printf '%s\n' "$file" >"$pathfile"
-	refresh_bar
-	notify 2000 "Recording started" "${file##*/}"
+start_cam() {
+	# $1: audio flags ("" for silent)
+	file=$(new_file)
+
+	# -nostdin keeps ffmpeg from swallowing the terminal's input; setsid as above.
+	# $! is the ffmpeg itself -- setsid execs rather than forks here, because a
+	# background job in a non-interactive shell is not a process group leader.
+	# shellcheck disable=SC2086
+	setsid ffmpeg -hide_banner -nostdin -y $CAM_VIDEO $1 $CAM_ENC "$file" >"$logfile" 2>&1 &
+	printf '%s\n' "$!" >"$pidfile"
+
+	settle "$file"
 }
 
 stop() {
 	recording || exit 0
-	pkill -INT -x wf-recorder 2>/dev/null || true
 
-	# SIGINT is what finalizes the mp4 -- wait for the process to actually go
-	# before reporting a path, or the file may still be unplayable.
+	# SIGINT is what finalizes the mp4 for both backends -- a KILL or TERM leaves
+	# a file that will not play.
+	pkill -INT -x wf-recorder 2>/dev/null || true
+	pid=$(cam_pid) && kill -INT "$pid" 2>/dev/null || true
+
+	# Wait for the process to actually go before reporting a path.
 	i=0
 	while recording && [ "$i" -lt 50 ]; do
 		sleep 0.1
 		i=$((i + 1))
 	done
+	rm -f "$pidfile"
 	refresh_bar
 
 	file=$(cat "$pathfile" 2>/dev/null || true)
@@ -86,11 +144,16 @@ menu() {
 		'Region — no audio' \
 		'Region — with mic' \
 		'Full screen — no audio' \
-		'Full screen — with mic' |
-		fuzzel --dmenu --lines 4 --prompt 'record > ') || exit 0
+		'Full screen — with mic' \
+		'Webcam — with mic' \
+		'Webcam — no audio' |
+		fuzzel --dmenu --lines 6 --prompt 'record > ') || exit 0
 	[ -n "$choice" ] || exit 0
 
+	# Webcam first: "Webcam — with mic" would otherwise fall into the *mic branch.
 	case "$choice" in
+	Webcam*mic) start_cam "$CAM_AUDIO" ; exit 0 ;;
+	Webcam*) start_cam "" ; exit 0 ;;
 	Region*) geom=$(slurp) || exit 0 ;; # Esc in slurp cancels silently
 	*) geom="" ;;
 	esac
@@ -104,8 +167,17 @@ menu() {
 case "${1:-menu}" in
 menu) menu ;;
 stop) stop ;;
+cam) # cam [mic] -- skips the menu, for a keybinding
+	recording && exit 0
+	case "${2:-}" in
+	mic) start_cam "$CAM_AUDIO" ;;
+	*) start_cam "" ;;
+	esac
+	;;
 status)
-	if recording; then
+	if cam_pid >/dev/null; then
+		printf '{"text":"●","tooltip":"Recording webcam — click to stop","class":"recording"}\n'
+	elif screen_recording; then
 		printf '{"text":"●","tooltip":"Recording — click to stop","class":"recording"}\n'
 	else
 		# Empty text makes waybar hide the module entirely, so the bar is
@@ -114,7 +186,7 @@ status)
 	fi
 	;;
 *)
-	echo "usage: $0 menu|stop|status" >&2
+	echo "usage: $0 menu|cam [mic]|stop|status" >&2
 	exit 1
 	;;
 esac
