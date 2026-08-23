@@ -65,3 +65,4 @@ finds them: type a few letters and press Tab.
 | `powerprofile-cycle` | waybar on-click: cycle power-saver -> balanced -> performance -> power-saver |
 | `powerprofile-status` | waybar custom module: show current power profile (tuned-ppd via net.hadess.PowerProfiles) |
 | `scripts` | List the custom scripts in ~/.local/bin with a one-line summary of each. |
+| `tmux-autosave` | Save the tmux-resurrect state whenever panes, windows or sessions change. |

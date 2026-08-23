@@ -1,0 +1,107 @@
+#!/bin/bash
+# Save the tmux-resurrect state whenever panes, windows or sessions change.
+# Driven by the tmux hooks in tmux.conf so the saved state is never older than
+# the last layout change. Coalesces bursts of events into a single save and
+# holds off while tmux-resurrect is restoring.
+#
+#   tmux-autosave            schedule a debounced save (what the hooks call)
+#   tmux-autosave now        save immediately, in the foreground
+#   tmux-autosave inhibit    suppress saves (resurrect's pre-restore hook)
+#   tmux-autosave resume     allow saves again (resurrect's post-restore hook)
+
+set -u
+
+SAVE="$HOME/.config/tmux/plugins/tmux-resurrect/scripts/save.sh"
+LOCK="${XDG_RUNTIME_DIR:-/tmp}/tmux-autosave.lock"
+REQ="$LOCK.request"
+DELAY="${TMUX_AUTOSAVE_DELAY:-1}"   # seconds a burst is coalesced over
+INHIBIT="@autosave-inhibit-until"
+
+[ -x "$SAVE" ] || exit 0
+
+now() { date +%s; }
+
+resurrect_dir() {
+	local dir
+	dir=$(tmux show-option -gqv @resurrect-dir 2>/dev/null)
+	[ -n "$dir" ] || dir="${XDG_DATA_HOME:-$HOME/.local/share}/tmux/resurrect"
+	echo "${dir/#\~/$HOME}"
+}
+
+# save.sh points 'last' at whatever it managed to write, so a server that dies
+# mid-dump leaves an empty file as the state to restore from. Keep the previous
+# one unless the new file actually describes a session.
+save_guarded() {
+	local dir last previous
+	dir=$(resurrect_dir)
+	last="$dir/last"
+	previous=$(readlink "$last" 2>/dev/null)
+
+	"$SAVE" quiet >/dev/null 2>&1
+
+	local current="$dir/$(readlink "$last" 2>/dev/null)"
+	if [ -s "$current" ] && grep -q "^pane" "$current" && grep -q "^window" "$current"; then
+		return 0
+	fi
+	[ -e "$current" ] && [ "$(readlink "$last")" != "$previous" ] && rm -f "$current"
+	if [ -n "$previous" ]; then
+		ln -fs "$previous" "$last"
+	else
+		rm -f "$last"   # nothing good to fall back to; don't leave a dangling link
+	fi
+	return 1
+}
+
+case "${1:-}" in
+	inhibit)
+		# A deadline rather than a flag, so a restore that dies before its
+		# post hook runs cannot silently disable saving forever.
+		tmux set-option -gq "$INHIBIT" "$(( $(now) + 300 ))"
+		exit 0
+		;;
+	resume)
+		tmux set-option -gq "$INHIBIT" 0
+		exit 0
+		;;
+	now)
+		save_guarded
+		exit $?
+		;;
+esac
+
+until_ts=$(tmux show-option -gqv "$INHIBIT" 2>/dev/null)
+case "$until_ts" in
+	''|*[!0-9]*) until_ts=0 ;;
+esac
+[ "$until_ts" -gt "$(now)" ] && exit 0
+
+# Drop a lock older than the debounce window: it belongs to a worker that was
+# killed before its trap could clean up.
+if [ -d "$LOCK" ] && [ -z "$(find "$LOCK" -maxdepth 0 -mmin -1)" ]; then
+	rmdir "$LOCK" 2>/dev/null
+fi
+
+# One worker at a time. Events that arrive while it holds the lock leave a
+# request behind instead of piling up their own saves.
+if ! mkdir "$LOCK" 2>/dev/null; then
+	touch "$REQ"
+	exit 0
+fi
+
+(
+	trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+	while :; do
+		rm -f "$REQ"
+		# tmux fires these hooks after the pane or window is gone, so there is
+		# nothing to wait for: save now, while the server is certainly still
+		# alive. Quitting right after closing a window can't outrun it.
+		# The last session going away takes the server with it; saving then
+		# would query a dead server and overwrite good state with nothing.
+		tmux list-sessions >/dev/null 2>&1 || break
+		save_guarded
+		# Then hold the lock briefly so a burst - a mouse resize, a session
+		# tearing down window by window - lands as one more save, not twenty.
+		sleep "$DELAY"
+		[ -e "$REQ" ] || break
+	done
+) &
