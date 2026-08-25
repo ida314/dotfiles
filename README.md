@@ -17,6 +17,7 @@ Managed as a normal repo (copy in/out); layout follows the bare-repo pattern:
 | `.xinitrc` | X session: feh + dunst + picom + slstatus + redshift, `exec dwm` |
 | `.config/redshift.conf` | night-light temps |
 | `.config/autorandr/docked/` | external-monitor profile (EDID-specific to current displays) |
+| `dwl/config.h` | dwl build config — symlinked to `~/git/dwl/config.h`; keybindings live here (MODKEY is Alt) |
 | `dwm/config.h`, `slstatus/config.h`, `slock/config.h` | suckless build configs (source-compiled) |
 | `powerctl/` | battery charging + idle rules; `cd powerctl && make install` |
 | `docs/` | design notes — see `docs/powerctl.md` |
