@@ -21,9 +21,42 @@ static const float fullscreen_bg[]         = {0.0f, 0.0f, 0.0f, 1.0f}; /* You ca
 static int log_level = WLR_ERROR;
 
 static const Rule rules[] = {
-	/* app_id             title       tags mask     isfloating   monitor */
-	{ "Gimp_EXAMPLE",     NULL,       0,            1,           -1 }, /* Start on currently visible tags floating, not tiled */
-	{ "firefox_EXAMPLE",  NULL,       1 << 8,       0,           -1 }, /* Start on ONLY tag "9" */
+	/* app_id             title       tags mask     isfloating   skipfocus  monitor */
+	/* skipfocus is a plain boolean here: 1 means the client can never hold the
+	 * keyboard focus, by any route (map, sloppyfocus hover, focusstack). */
+	{ "Gimp_EXAMPLE",     NULL,       0,            1,           0,         -1 }, /* Start on currently visible tags floating, not tiled */
+	{ "firefox_EXAMPLE",  NULL,       1 << 8,       0,           0,         -1 }, /* Start on ONLY tag "9" */
+
+	/* ibus candidate/property popups (Japanese conversion list, etc).
+	 *
+	 * This one is load-bearing, not cosmetic. ibus-ui-gtk3 draws the candidate
+	 * window as an ordinary xdg_toplevel -- it has no other option, since this
+	 * dwl has no text-input-v3 and the IME reaches apps through the GTK/Qt IM
+	 * modules over D-Bus, entirely behind the compositor's back. So dwl sees a
+	 * normal window: it tiles it, and it focuses it. Focusing it takes the
+	 * keyboard away from the field you are composing in, ibus drops the
+	 * preedit and hides the popup, focus falls back, the popup reopens --
+	 * こんにちは flickers once and dies. sloppyfocus=1 makes it worse, because
+	 * simply hovering the popup re-triggers it.
+	 *
+	 * isfloating keeps it out of the tiling layout; skipfocus is the actual
+	 * fix. app_id is "ibus-ui-gtk3" because GTK3 on Wayland sets app_id from
+	 * g_get_prgname(), i.e. the basename of the executable (verified with
+	 * WAYLAND_DEBUG=1). The match is strstr, so it also covers any other
+	 * toplevel that panel puts up.
+	 *
+	 * Known cosmetic limit: dwl has no way to place the popup under the caret,
+	 * because the caret position travels over ibus's D-Bus channel, not over
+	 * Wayland. The candidate list lands where a floating window lands. Fixing
+	 * that properly needs text-input-v3 in dwl. */
+	{ "ibus-ui-gtk3",     NULL,       0,            1,           1,         -1 },
+
+	/* Tor Browser floats so it keeps its own default window size: letterboxing
+	 * picks a common size to blend in, and tiling would stretch it to a
+	 * fingerprintable one. app_id is "Tor Browser Alpha" (WAYLAND_DEBUG=1);
+	 * strstr matching also covers a future stable "Tor Browser". */
+	{ "Tor Browser",      NULL,       0,            1,           0,         -1 },
+
     /* default/example rule: can be changed but cannot be eliminated; at least one rule must exist */
 };
 
@@ -58,6 +91,10 @@ static const MonitorRule monrules[] = {
  *
  * .variant is positional and must line up with .layout entry-for-entry, so the
  * three leading commas mean "default variant" for us/es/pt.
+ *
+ * The current group is shown in waybar: dwl's kblayout() sees the group change
+ * land as a modifiers event and calls `dwl-language report`, which owns the
+ * indicator and the toast. Japanese/Chinese ride on top via ibus (Super+space).
  *
  * Do NOT use any grp: option built on a modifier key (grp:alt_shift_toggle,
  * grp:lalt_toggle, grp:lctrl_lshift_toggle, ...). Those redefine the modifier
@@ -213,6 +250,25 @@ static const Key keys[] = {
 	/* Toggle the top bar. SIGUSR1 is waybar's built-in show/hide; SIGUSR2 is
 	 * reload and the custom modules use SIGRTMIN+8/9/10, so nothing collides. */
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_b, spawn, SHCMD("pkill -SIGUSR1 waybar") },
+
+	/* Mute the trackpad (keyboard-only mode). libinput stops sending events at
+	 * the source, so nothing moves the cursor and sloppyfocus can't steal focus
+	 * on a stray palm. The keyboard and any external mouse are unaffected.
+	 * Alt+m is the monocle layout; only the Shift variant is the trackpad. */
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_m, togglepointer, {0} },
+
+	/* Cycle the input method (English -> 日本語 -> 中文, whatever ibus's
+	 * preload-engines holds). This is the *other* language switch: Shift+CapsLock
+	 * cycles the plain xkb layouts above, which can only ever be a 1:1 key->glyph
+	 * map, while Japanese and Chinese need a candidate popup and therefore an IME.
+	 * ibus's own <Super>space trigger is disabled (gsettings
+	 * org.freedesktop.ibus.general.hotkey triggers) so the switch has exactly one
+	 * owner and the bar indicator can never drift out of sync.
+	 * Super, not Alt: keyd only rewrites meta+<letter>, so meta+space arrives
+	 * here untouched -- and Alt+space is already setlayout.
+	 * Reminder: with no text-input-v3 in this build the IME reaches GTK and Qt
+	 * apps only, never native-Wayland Firefox. See startup.sh. */
+	{ WLR_MODIFIER_LOGO, XKB_KEY_space, spawn, SHCMD("$HOME/.local/bin/dwl-language ime next") },
 
 	/* Lock on demand. Same gtklock entry point swayidle uses for the 3 min idle
 	 * timeout and before-sleep, so manual and automatic locks look identical. */
