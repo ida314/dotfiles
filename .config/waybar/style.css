@@ -51,6 +51,10 @@ window#waybar {
 /* trackpad muted: amber, same "deliberately off" colour as suspend/chargecap */
 #custom-trackpad.off { color: #e5c07b; }
 
+/* mic muted: red, not the amber of the other "off" states -- a muted mic is
+   the one that silently ruins a recording or a call, so it should look wrong */
+#pulseaudio.mic { color: #e06c75; }
+
 #custom-suspend.off { color: #e5c07b; }
 #custom-chargecap.on { color: #98c379; }
 /* configured but not enforced -- amber, same as the suspend override */

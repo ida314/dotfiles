@@ -6,7 +6,7 @@
 
   "modules-left": ["dwl/tags", "dwl/window"],
   "modules-center": ["custom/record", "clock"],
-  "modules-right": ["tray", "custom/language", "custom/trackpad", "memory", "custom/powerprofile", "custom/suspend", "network", "bluetooth", "pulseaudio", "backlight", "custom/chargecap", "battery"],
+  "modules-right": ["tray", "custom/language", "custom/trackpad", "memory", "custom/powerprofile", "custom/suspend", "network", "bluetooth", "pulseaudio#mic", "pulseaudio", "backlight", "custom/chargecap", "battery"],
 
   "dwl/tags": {
     "num-tags": 9
@@ -109,6 +109,23 @@
     "tooltip-format": "{status}",
     "format-connected": " {device_alias}",
     "on-click": "blueman-manager"
+  },
+
+  // Mic-muted warning, left of the volume. Text only while the default source
+  // is muted, empty otherwise so waybar hides it -- the trackpad trick again.
+  // A second pulseaudio instance rather than a custom script: it is event-
+  // driven, so a mute from the F5 mic key, pavucontrol or wpctl all show up
+  // without polling or a signal. format-muted repeats format so muting the
+  // *speakers* doesn't make this module say anything. Click unmutes.
+  // WirePlumber persists the mute across reboots, so it can sit there unseen
+  // for weeks -- which is how a whole webcam recording came out silent.
+  "pulseaudio#mic": {
+    "format": "{format_source}",
+    "format-muted": "{format_source}",
+    "format-source": "",
+    "format-source-muted": "󰍭 mic muted",
+    "on-click": "wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle",
+    "tooltip-format": "Microphone muted -- click or F5 to unmute"
   },
 
   "pulseaudio": {
