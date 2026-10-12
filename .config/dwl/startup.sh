@@ -38,9 +38,10 @@ command -v swaybg >/dev/null && swaybg -c '#222222' &
 "$HOME/.local/bin/dwl-language" reset 2>/dev/null
 command -v waybar >/dev/null && waybar &
 
-# tray applets (NetworkManager wifi menu + Bluetooth) — same backends KDE used
+# tray applets (NetworkManager wifi menu) — same backend KDE used
 command -v nm-applet >/dev/null && nm-applet --indicator &
-command -v blueman-applet >/dev/null && blueman-applet &
+# blueman-applet is not started here (~60 MB idle): D-Bus activates it
+# (org.blueman.Applet) when blueman-manager opens from the waybar module
 
 # notifications
 command -v mako >/dev/null && mako &
