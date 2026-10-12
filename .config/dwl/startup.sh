@@ -30,6 +30,9 @@ command -v swaybg >/dev/null && swaybg -c '#222222' &
 # state is internal and resets), so clear the lock screen's copy of that state
 # to match — otherwise the two disagree until the next click.
 "$HOME/.local/bin/dwl-clock-hide" show 2>/dev/null
+# Same idea for the trackpad indicator: dwl's togglepointer() always starts
+# enabled, so drop any state file left behind by a previous dwl in this login.
+"$HOME/.local/bin/dwl-trackpad" reset 2>/dev/null
 command -v waybar >/dev/null && waybar &
 
 # tray applets (NetworkManager wifi menu + Bluetooth) — same backends KDE used

@@ -6,7 +6,7 @@
 
   "modules-left": ["dwl/tags", "dwl/window"],
   "modules-center": ["custom/record", "clock"],
-  "modules-right": ["tray", "memory", "custom/powerprofile", "custom/suspend", "network", "bluetooth", "pulseaudio", "backlight", "custom/chargecap", "battery"],
+  "modules-right": ["tray", "custom/trackpad", "memory", "custom/powerprofile", "custom/suspend", "network", "bluetooth", "pulseaudio", "backlight", "custom/chargecap", "battery"],
 
   "dwl/tags": {
     "num-tags": 9
@@ -37,6 +37,18 @@
     "interval": 10,
     "signal": 10,
     "on-click": "~/.local/bin/dwl-record stop",
+    "tooltip": true
+  },
+
+  // Shown only while the trackpad is muted (Alt+Shift+m -> dwl's togglepointer).
+  // Empty text the rest of the time, so waybar hides it -- same trick as
+  // custom/chargecap. dwl has no way to push bar state, so the script signals
+  // us; "once" plus signal 11 means no polling (8/9/10 are already taken).
+  "custom/trackpad": {
+    "exec": "~/.local/bin/dwl-trackpad status",
+    "return-type": "json",
+    "interval": "once",
+    "signal": 11,
     "tooltip": true
   },
 

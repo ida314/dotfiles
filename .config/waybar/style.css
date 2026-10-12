@@ -34,12 +34,16 @@ window#waybar {
 #battery,
 #custom-powerprofile,
 #custom-suspend,
-#custom-chargecap {
+#custom-chargecap,
+#custom-trackpad {
   padding: 0 10px;
 }
 
 /* recording indicator: red dot, immediately left of the clock */
 #custom-record { color: #e06c75; padding: 0 4px 0 10px; }
+
+/* trackpad muted: amber, same "deliberately off" colour as suspend/chargecap */
+#custom-trackpad.off { color: #e5c07b; }
 
 #custom-suspend.off { color: #e5c07b; }
 #custom-chargecap.on { color: #98c379; }

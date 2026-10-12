@@ -1,0 +1,56 @@
+#!/bin/sh
+# Trackpad mute indicator for dwl. The actual enable/disable lives in dwl
+# itself (togglepointer(), bound to Alt+Shift+m), because only the compositor
+# holds the libinput device handles. This script owns the *visible* half:
+# the state file waybar reads, the bar refresh, and the mako toast.
+#
+# Usage:
+#   dwl-trackpad report disabled|enabled   called by dwl on each toggle
+#   dwl-trackpad status                    waybar custom module (JSON)
+#   dwl-trackpad reset                     clear stale state (startup.sh)
+#
+# The state file lives in $XDG_RUNTIME_DIR, so it dies with the login session
+# and a fresh dwl always starts from "enabled" -- matching togglepointer's own
+# initial state. `reset` is belt-and-braces for restarting dwl inside one login.
+set -eu
+
+STATE="${XDG_RUNTIME_DIR:-/tmp}/dwl-trackpad"
+SIGNAL=11   # waybar SIGRTMIN+11; 8/9/10 are suspend/chargecap/record
+
+case "${1:-status}" in
+report)
+	case "${2:-}" in
+	disabled)
+		echo disabled > "$STATE"
+		notify-send -a dwl-trackpad -t 1500 \
+			-h string:x-canonical-private-synchronous:trackpad \
+			"Trackpad" "Disabled — keyboard only"
+		;;
+	*)
+		rm -f "$STATE"
+		notify-send -a dwl-trackpad -t 1500 \
+			-h string:x-canonical-private-synchronous:trackpad \
+			"Trackpad" "Enabled"
+		;;
+	esac
+	pkill -SIGRTMIN+$SIGNAL waybar 2>/dev/null || true
+	;;
+status)
+	# Empty text while enabled: waybar hides an empty module, so the bar looks
+	# untouched until the trackpad is actually off. Same trick as
+	# custom/chargecap and custom/record.
+	if [ -f "$STATE" ]; then
+		printf '{"text":"󰍾","class":"off","tooltip":"Trackpad disabled — Alt+Shift+m to enable"}\n'
+	else
+		printf '{"text":"","class":"on","tooltip":"Trackpad enabled"}\n'
+	fi
+	;;
+reset)
+	rm -f "$STATE"
+	pkill -SIGRTMIN+$SIGNAL waybar 2>/dev/null || true
+	;;
+*)
+	echo "usage: dwl-trackpad report disabled|enabled | status | reset" >&2
+	exit 1
+	;;
+esac
