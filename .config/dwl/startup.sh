@@ -33,6 +33,9 @@ command -v swaybg >/dev/null && swaybg -c '#222222' &
 # Same idea for the trackpad indicator: dwl's togglepointer() always starts
 # enabled, so drop any state file left behind by a previous dwl in this login.
 "$HOME/.local/bin/dwl-trackpad" reset 2>/dev/null
+# ...and for the language indicator: a fresh dwl starts on the first xkb group
+# with ibus back on its default engine, so any leftover state file is a lie.
+"$HOME/.local/bin/dwl-language" reset 2>/dev/null
 command -v waybar >/dev/null && waybar &
 
 # tray applets (NetworkManager wifi menu + Bluetooth) — same backends KDE used
@@ -58,7 +61,12 @@ command -v mako >/dev/null && mako &
 # binding_common_get_xdisplay (5 coredumps per login) until one instance
 # happened to survive. -R is kept deliberately: it respawns the panel, which
 # provides the CJK candidate window, if it dies.
-# Toggle CJK with Super+Space; configure engines with `ibus-setup`.
+# Super+Space cycles the engine -- but through dwl's keybinding, which calls
+# `dwl-language ime next`, NOT through ibus's own trigger (that is disabled in
+# gsettings org.freedesktop.ibus.general.hotkey triggers). One owner means the
+# waybar indicator can never disagree with what you are actually typing.
+# The engine list is gsettings org.freedesktop.ibus.general preload-engines;
+# `ibus-setup` edits the same thing with a GUI.
 command -v ibus-daemon >/dev/null && ibus-daemon -drR --desktop=dwl &
 
 # night light: NOT auto-started; toggle it with Alt+n (Alt+Shift+n warmer,

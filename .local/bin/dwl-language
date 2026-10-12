@@ -1,0 +1,143 @@
+#!/bin/sh
+# Language indicator for dwl: the visible half of switching input languages.
+#
+# There are two independent switches on this machine, and this script is the
+# one place that knows about both:
+#
+#   Shift+CapsLock  cycles the xkb layout group (us -> es -> pt -> ru -> us).
+#                   Pure xkb, handled inside the keymap by grp:shift_caps_toggle
+#                   -- dwl has no keybinding for it. dwl's kblayout() spots the
+#                   group change in keypressmod() and calls `report` here.
+#   Super+space     cycles the ibus engine (English -> 日本語 -> 中文). CJK needs
+#                   a candidate popup that xkb cannot express, so it has to be an
+#                   IME. dwl binds this key and calls `ime next` here.
+#
+# An active ibus engine sits *on top of* the xkb layout, so it wins the display:
+# with mozc on you are typing Japanese whatever the xkb group underneath says.
+#
+# Usage:
+#   dwl-language report IDX NAME   called by dwl on each xkb group change
+#   dwl-language ime next          cycle the ibus engine (Super+space)
+#   dwl-language status            waybar custom module (JSON)
+#   dwl-language reset             clear stale state (startup.sh)
+#
+# State lives in $XDG_RUNTIME_DIR so it dies with the login session; a fresh dwl
+# starts from the first xkb group and ibus's default engine, which is what
+# `reset` restores.
+set -eu
+
+STATE="${XDG_RUNTIME_DIR:-/tmp}/dwl-language"
+SIGNAL=12   # waybar SIGRTMIN+12; 8/9/10/11 are suspend/chargecap/record/trackpad
+
+# Short code + tooltip for an xkb layout name as xkb_keymap_layout_get_name()
+# reports it ("English (US)", "Russian", ...). Matching the name rather than the
+# group index means reordering .layout in dwl's config.h needs no change here.
+xkb_code() {
+	case "$1" in
+	English*)    echo EN ;;
+	Spanish*)    echo ES ;;
+	Portuguese*) echo PT ;;
+	Russian*)    echo RU ;;
+	French*)     echo FR ;;
+	German*)     echo DE ;;
+	'')          echo EN ;;
+	*)           echo "$1" | cut -c1-2 | tr '[:lower:]' '[:upper:]' ;;
+	esac
+}
+
+# Short code + label for an ibus engine name. xkb:* engines are ibus passing
+# keystrokes straight through, i.e. "no IME" -- those fall back to the xkb group.
+ime_code() {
+	case "$1" in
+	mozc*|anthy*)  echo "あ	日本語" ;;
+	chewing*)      echo "中	中文" ;;
+	libpinyin*|pinyin*) echo "拼	中文 (拼音)" ;;
+	hangul*)       echo "한	한국어" ;;
+	xkb:*|'')      echo "" ;;
+	*)             echo "$1	$1" ;;
+	esac
+}
+
+# The engines to cycle through, in order, from ibus's own configured list.
+ime_engines() {
+	gsettings get org.freedesktop.ibus.general preload-engines 2>/dev/null \
+		| tr -d "[]'" | tr ',' '\n' | sed 's/^ *//; s/ *$//' | grep -v '^$'
+}
+
+ime_current() { ibus engine 2>/dev/null || true; }
+
+notify() {
+	notify-send -a dwl-language -t 1500 \
+		-h string:x-canonical-private-synchronous:language \
+		"$1" "$2" 2>/dev/null || true
+}
+
+refresh() { pkill -SIGRTMIN+$SIGNAL waybar 2>/dev/null || true; }
+
+case "${1:-status}" in
+report)
+	# $2 = group index (unused for display, kept for debugging), $3 = layout name
+	name="${3:-}"
+	code=$(xkb_code "$name")
+	printf '%s\n%s\n' "$code" "$name" > "$STATE"
+	# Only toast when no IME is masking the layout -- otherwise the message
+	# would announce a language you are not actually typing.
+	if [ -z "$(ime_code "$(ime_current)")" ]; then
+		notify "󰌌  $code" "${name:-Keyboard layout}"
+	fi
+	refresh
+	;;
+ime)
+	case "${2:-next}" in
+	next)
+		cur=$(ime_current)
+		engines=$(ime_engines)
+		[ -n "$engines" ] || { notify "Input method" "No ibus engines configured — run ibus-setup"; exit 0; }
+		# Pick the entry after the current one, wrapping at the end. An unknown
+		# or empty current engine lands on the first.
+		next=$(printf '%s\n' "$engines" | awk -v cur="$cur" '
+			{ e[NR] = $0; if ($0 == cur) i = NR }
+			END { print (i && i < NR) ? e[i+1] : e[1] }')
+		ibus engine "$next" 2>/dev/null || {
+			notify "Input method" "ibus is not running"
+			exit 0
+		}
+		label=$(ime_code "$next" | cut -f2)
+		if [ -n "$label" ]; then
+			notify "$(ime_code "$next" | cut -f1)  $label" "Input method — Super+space to switch"
+		else
+			# Back to pass-through: the xkb layout is what you are typing again.
+			code=$(head -1 "$STATE" 2>/dev/null || echo EN)
+			notify "󰌌  $code" "$(sed -n 2p "$STATE" 2>/dev/null || echo 'Keyboard layout')"
+		fi
+		refresh
+		;;
+	*)
+		echo "usage: dwl-language ime next" >&2
+		exit 1
+		;;
+	esac
+	;;
+status)
+	ime=$(ime_code "$(ime_current)")
+	if [ -n "$ime" ]; then
+		icon=$(printf '%s' "$ime" | cut -f1)
+		label=$(printf '%s' "$ime" | cut -f2)
+		printf '{"text":"%s","class":"ime","tooltip":"%s — Super+space to switch input method"}\n' \
+			"$icon" "$label"
+	else
+		code=$(head -1 "$STATE" 2>/dev/null || echo EN)
+		name=$(sed -n 2p "$STATE" 2>/dev/null || echo 'English (US)')
+		printf '{"text":"󰌌 %s","class":"xkb","tooltip":"%s — Shift+CapsLock for the next layout, Super+space for Japanese"}\n' \
+			"$code" "$name"
+	fi
+	;;
+reset)
+	rm -f "$STATE"
+	refresh
+	;;
+*)
+	echo "usage: dwl-language report IDX NAME | ime next | status | reset" >&2
+	exit 1
+	;;
+esac

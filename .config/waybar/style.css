@@ -1,5 +1,5 @@
 * {
-  font-family: "JetBrainsMono Nerd Font", "Noto Sans", sans-serif;
+  font-family: "JetBrainsMono Nerd Font", "Noto Sans", "Noto Sans CJK JP", sans-serif;
   font-size: 13px;
   min-height: 0;
 }
@@ -35,12 +35,18 @@ window#waybar {
 #custom-powerprofile,
 #custom-suspend,
 #custom-chargecap,
-#custom-trackpad {
+#custom-trackpad,
+#custom-language {
   padding: 0 10px;
 }
 
 /* recording indicator: red dot, immediately left of the clock */
 #custom-record { color: #e06c75; padding: 0 4px 0 10px; }
+
+/* Input language. Plain xkb layout is normal bar text -- it is the resting
+   state; an active IME (Japanese/Chinese) goes accent blue, because that one
+   really does change what every keystroke produces. */
+#custom-language.ime { color: #61afef; font-weight: bold; }
 
 /* trackpad muted: amber, same "deliberately off" colour as suspend/chargecap */
 #custom-trackpad.off { color: #e5c07b; }

@@ -6,7 +6,7 @@
 
   "modules-left": ["dwl/tags", "dwl/window"],
   "modules-center": ["custom/record", "clock"],
-  "modules-right": ["tray", "custom/trackpad", "memory", "custom/powerprofile", "custom/suspend", "network", "bluetooth", "pulseaudio", "backlight", "custom/chargecap", "battery"],
+  "modules-right": ["tray", "custom/language", "custom/trackpad", "memory", "custom/powerprofile", "custom/suspend", "network", "bluetooth", "pulseaudio", "backlight", "custom/chargecap", "battery"],
 
   "dwl/tags": {
     "num-tags": 9
@@ -37,6 +37,21 @@
     "interval": 10,
     "signal": 10,
     "on-click": "~/.local/bin/dwl-record stop",
+    "tooltip": true
+  },
+
+  // Current input language. Two sources, one module: the xkb layout group
+  // (Shift+CapsLock, reported by dwl's kblayout() hook) and the ibus engine
+  // (Super+space), with an active IME winning because it sits on top of the
+  // layout. Always visible -- there was no layout indicator anywhere before,
+  // which made a stray Shift+CapsLock look like a broken punctuation key.
+  // Click cycles the input method, same as Super+space.
+  "custom/language": {
+    "exec": "~/.local/bin/dwl-language status",
+    "on-click": "~/.local/bin/dwl-language ime next",
+    "return-type": "json",
+    "interval": "once",
+    "signal": 12,
     "tooltip": true
   },
 
