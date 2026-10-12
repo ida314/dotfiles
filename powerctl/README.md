@@ -74,6 +74,13 @@ now" override, distinct from configuring `never`. While it holds, a shadowed
 screen rule comes back to life — otherwise an idle session would sit awake, lit
 and unlocked.
 
+**Waking is held back for a moment.** Turning the panel back on within about
+0.75s of turning it off wedges the display coprocessor, and the screen stays
+black until reboot — and a reflexive touch as the screen goes dark lands right
+in that window. So the screen rule's resume is `powerctl-idle-action wake`, not
+a bare `wlopm --on`: it holds the power-on until 1.5s after the blank, and says
+so in swayidle.service's journal when it does. Any later wake is immediate.
+
 ### Closing the lid
 
 ```sh
@@ -116,7 +123,7 @@ health policy or the swayidle handover — both have non-obvious constraints.
 | Path | |
 |---|---|
 | `bin/powerctl` | the entire CLI |
-| `bin/powerctl-idle-action` | swayidle handler; no-ops unless the timeout matches the live power source |
+| `bin/powerctl-idle-action` | swayidle handler; no-ops unless the timeout matches the live power source, holds back a too-early wake |
 | `etc/rules.conf` | charging rules → `/etc/powerctl/` (root) |
 | `config/idle.conf` | idle rules → `~/.config/powerctl/` (user) |
 | `systemd/system/` | apply-on-boot, reapply-on-resume, weekly health refresh |

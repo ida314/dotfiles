@@ -345,7 +345,9 @@ gen_idle_cmd() {
                    "$_secs" "$_kind" "$_secs"
             if [ "$_kind" = screen ]; then
                 printf ' \\\n'
-                printf '    resume %s' "'wlopm --on \"*\"'"
+                # Never a bare wlopm --on: waking the panel too soon after the
+                # blank wedges apple-dcp. The handler holds it back.
+                printf '    resume %s' "'powerctl-idle-action wake'"
             fi
             printf ' \\\n'
         done

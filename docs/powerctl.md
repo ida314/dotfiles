@@ -412,6 +412,39 @@ Dead config should not be silent, so `powerctl idle` marks the pair and
 `powerctl idle set` warns after a change that creates one. Neither refuses —
 "sleep, and never mind the screen" is a legitimate thing to want.
 
+### Waking too soon wedges the display
+
+`apple-dcp`, the display coprocessor, does not survive being powered back on
+while it is still settling from a power-off. It accepts the power-on, but the
+panel never reconnects: the kernel log shows `set_digital_out_mode finished`
+and then nothing — never the `IOAVVideoInterface published` / `display HPD
+asserted` pair a healthy wake logs ~200ms later. Every page flip after that
+times out (`[drm] *ERROR* flip_done timed out`) and the panel stays black until
+reboot. Nothing else notices; audio, network and a call in progress carry on.
+
+Across every boot in the journal (264 power-ons, 2026-10-12), the two real
+off→on gaps under 0.75s — 0.40s and 0.59s — both wedged, and every gap of 0.75s
+or more came back. (The many ~1ms "gaps" are suspend/resume: kernel timestamps
+stop during s2idle, so those are not short at all.) The trigger is ordinary:
+the screen goes dark while you are still at the machine, and you touch it.
+
+So the screen rule's `resume` is `powerctl-idle-action wake`, never a bare
+`wlopm --on`. The screen rule stamps `$XDG_RUNTIME_DIR/powerctl-blanked-at`
+(boot clock) right after `wlopm --off` returns, which is when the panel is down
+— measured 2ms after `dcp_poweroff() done`. `wake` holds the power-on until
+1.5s after that stamp, twice the largest gap seen to wedge, and logs e.g.
+`wake 0.21s after blank, holding 1.29s for apple-dcp` when it does. A wake any
+later is immediate. `after-resume` stays a bare `wlopm --on`: it only runs
+after a suspend, by which point the panel has been down far longer than that.
+
+Verified 2026-10-12 by walking the path for real: blank through the screen
+rule, a virtual-pointer nudge 0.21s later. The power-on went out at +1.52s and
+the panel came back (HPD at +1.74s, no flip timeouts). The unguarded control
+was not run; recovering from it takes a reboot.
+
+The pre-powerctl `startup.sh` line carried a `sleep 0.5` for this. It was lost
+in the handover, and 0.5s would not have covered the 0.59s wedge anyway.
+
 ### Durations take a mandatory unit
 
 `parse_dur` rejects a bare number rather than picking a meaning for it. Read as

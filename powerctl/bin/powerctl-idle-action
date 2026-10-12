@@ -1,5 +1,6 @@
 #!/bin/sh
 # swayidle handler, invoked as: powerctl-idle-action <screen|sleep> <timeout>
+#                           or: powerctl-idle-action wake
 #
 # Every configured timeout is registered with swayidle, including ones that only
 # apply on the other power source. This handler no-ops unless the timeout that
@@ -7,10 +8,48 @@
 # transitions take effect without restarting swayidle and resetting its counter.
 #
 # It also arbitrates between the two rules: sleep has precedence over screen.
+#
+# `wake` is the screen rule's resume half: it turns the panel back on, but not
+# too soon after the screen rule turned it off.
 
 set -eu
 
-kind=${1:?usage: powerctl-idle-action <screen|sleep> <timeout>}
+kind=${1:?usage: powerctl-idle-action <screen|sleep> <timeout> | wake}
+
+# apple-dcp, the display coprocessor, wedges for good if the panel is powered
+# back on while it is still settling from a power-off: the power-on is
+# accepted, the panel never reconnects, and the screen stays black until
+# reboot. Off->on gaps of 0.40s and 0.59s wedged; every gap of 0.75s or more
+# came back. A key pressed the moment the screen goes dark lands in that window.
+#
+# So the screen rule stamps when the panel went down, and wake holds the
+# power-on until WAKE_GUARD seconds after that. A wake long after the blank
+# runs at once. Boot-clock time (/proc/uptime), so a wall-clock step can't
+# stretch the hold; the runtime dir, so the stamp can't outlive its boot; and
+# the hold is capped at WAKE_GUARD regardless.
+BLANKED_AT="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/powerctl-blanked-at"
+WAKE_GUARD=1.5
+
+if [ "$kind" = wake ]; then
+    read -r now _ < /proc/uptime
+    at=$(cat "$BLANKED_AT" 2>/dev/null) || at=
+    # "<seconds since the blank> <seconds still to hold>", or nothing
+    hold=$(awk -v at="$at" -v now="$now" -v g="$WAKE_GUARD" 'BEGIN {
+        if (at == "") exit
+        h = at + g - now
+        if (h > g) h = g
+        if (h > 0) printf "%.2f %.2f", now - at, h
+    }')
+    if [ -n "$hold" ]; then
+        # shellcheck disable=SC2086
+        set -- $hold
+        # stderr is swayidle.service's journal: leave evidence the guard held
+        echo "powerctl-idle-action: wake $1s after blank, holding $2s for apple-dcp" >&2
+        sleep "$2"
+    fi
+    exec wlopm --on '*'
+fi
+
 fired=${2:?}
 
 IDLE_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/powerctl/idle.conf"
@@ -70,6 +109,9 @@ screen)
         exit 0
     fi
     wlopm --off '*' 2>/dev/null || true
+    # After the off, so the guard counts from the panel going down. A failed
+    # stamp only costs the guard; it must never cost the lock.
+    cut -d' ' -f1 /proc/uptime > "$BLANKED_AT" || true
     exec "$HOME/.local/bin/dwl-lock"
     ;;
 sleep)
