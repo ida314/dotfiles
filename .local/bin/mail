@@ -1,0 +1,17 @@
+#!/bin/sh
+# Launch aerc with the Bitwarden vault already unlocked.
+# aerc runs its *-cred-cmd hooks at startup, so a locked rbw agent would fire
+# pinentry-curses into the same terminal aerc is about to take over fullscreen
+# and the two would fight over the TTY. Unlocking first keeps the prompt and
+# the TUI from overlapping. rbw's lock_timeout means this is usually a no-op.
+# Usage: mail [aerc args...]
+set -eu
+
+if ! rbw unlocked >/dev/null 2>&1; then
+	rbw unlock || {
+		echo "mail: vault stayed locked, not starting aerc" >&2
+		exit 1
+	}
+fi
+
+exec aerc "$@"
