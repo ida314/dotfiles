@@ -1,0 +1,23 @@
+#!/bin/sh
+# power-feed -- print one power line every few seconds, for piping into overlay:
+#   power-feed | overlay
+# On battery: "62% 4.8W" (draw). Charging: "45% +38.2W". On AC but not
+# charging (e.g. held at the charge cap): "80% AC". The date follows:
+# "62% 4.8W · Sun 10/25".
+# Test harness for overlay; the intended home is a `powerctl overlay` subcommand.
+
+BAT=/sys/class/power_supply/macsmc-battery
+AC=/sys/class/power_supply/macsmc-ac
+INTERVAL=${1:-5}
+
+while :; do
+	awk -v c="$(cat $BAT/capacity)" -v p="$(cat $BAT/power_now)" \
+	    -v s="$(cat $BAT/status)" -v ac="$(cat $AC/online)" \
+	    -v d="$(date '+%a %-m/%-d')" 'BEGIN {
+		w = (p < 0 ? -p : p) / 1e6
+		if (s == "Charging")   printf "%d%% +%.1fW · %s\n", c, w, d
+		else if (ac == 1)      printf "%d%% AC · %s\n", c, d
+		else                   printf "%d%% %.1fW · %s\n", c, w, d
+	}' || exit
+	sleep "$INTERVAL"
+done
