@@ -34,6 +34,7 @@ window#waybar {
 #battery,
 #custom-powerprofile,
 #custom-suspend,
+#custom-lid,
 #custom-chargecap,
 #custom-trackpad,
 #custom-language {
@@ -56,6 +57,8 @@ window#waybar {
 #pulseaudio.mic { color: #e06c75; }
 
 #custom-suspend.off { color: #e5c07b; }
+/* lid held awake: amber, another deliberate override of the default */
+#custom-lid.awake { color: #e5c07b; }
 #custom-chargecap.on { color: #98c379; }
 /* configured but not enforced -- amber, same as the suspend override */
 #custom-chargecap.paused { color: #e5c07b; }

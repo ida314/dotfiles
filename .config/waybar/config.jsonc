@@ -6,7 +6,7 @@
 
   "modules-left": ["dwl/tags", "dwl/window"],
   "modules-center": ["custom/record", "clock"],
-  "modules-right": ["tray", "custom/language", "custom/trackpad", "memory", "custom/powerprofile", "custom/suspend", "network", "bluetooth", "pulseaudio#mic", "pulseaudio", "backlight", "custom/chargecap", "battery"],
+  "modules-right": ["tray", "custom/language", "custom/trackpad", "memory", "custom/powerprofile", "custom/suspend", "custom/lid", "network", "bluetooth", "pulseaudio#mic", "pulseaudio", "backlight", "custom/chargecap", "battery"],
 
   "dwl/tags": {
     "num-tags": 9
@@ -93,6 +93,20 @@
     "interval": "once",
     "signal": 8,
     "on-click": "~/.local/bin/dwl-suspend-toggle",
+    "tooltip": true
+  },
+
+  // What closing the lid does. Click holds it awake: screen off and locked,
+  // nothing suspends (idle sleep included) while it is shut. A logind
+  // inhibitor held by a user unit, so no sudo -- unlike `powerctl lid off`,
+  // which would hang on a password prompt from here. Always visible: it is a
+  // toggle, and a hidden module cannot be clicked. Signal 13 (8-12 taken).
+  "custom/lid": {
+    "exec": "powerctl lid status --waybar",
+    "return-type": "json",
+    "interval": "once",
+    "signal": 13,
+    "on-click": "powerctl lid toggle",
     "tooltip": true
   },
 
