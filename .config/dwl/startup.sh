@@ -52,7 +52,7 @@ command -v mako >/dev/null && mako &
 #
 # NOTE: this dwl build has no input-method-v2/text-input-v3 support (the
 # upstream branch is from 2022 and does not port to wlroots 0.20), AND it is
-# built without XWayland (XWAYLAND is empty in ~/git/dwl/config.mk). So ibus can
+# built without XWayland (XWAYLAND is empty in ~/code/oss/dwl/config.mk). So ibus can
 # only reach apps through the GTK/Qt IM modules: CJK works in GTK and Qt apps,
 # and nowhere else. There is no X fallback -- do not bother with
 # MOZ_ENABLE_WAYLAND=0 for Firefox, there is no XWayland to fall back to.
