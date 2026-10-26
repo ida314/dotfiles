@@ -1,0 +1,180 @@
+#!/bin/sh
+# Long-lived OpenPGP identity: an offline ed25519 primary with daily-use subkeys.
+# All work happens in a throwaway GNUPGHOME on /dev/shm (RAM), so the primary
+# secret never touches the laptop's disk, which is unencrypted btrfs where a
+# deleted file can't be reliably erased. Only the subkeys are imported
+# into ~/.gnupg, which then shows the primary as `sec#` (not present).
+# Passphrases are asked by pinentry; nothing here reads or stores them. Expect
+# several prompts: gpg-agent skips its cache for every secret-key export.
+# Guide: ~/Documents/Obsidian/personal/pgp-key.md
+# Usage: pgpkey generate ["Name <email>"] | extend <primary.asc> [period]
+set -eu
+
+UID_DEFAULT='Dylan <dylan@dodds.org>'
+
+usage() {
+    cat <<'EOF'
+Usage: pgpkey generate ["Name <email>"]   new key: primary [C] 3y, subkeys [S] [E] [A] 2y
+       pgpkey extend <primary.asc> [2y]   push primary + subkey expiry out from today
+
+Both write their output to a directory on /dev/shm and wait for you to copy
+it to your backups before wiping it. /dev/shm is RAM, so it also goes away at reboot.
+EOF
+}
+
+die() { echo "pgpkey: $*" >&2; exit 1; }
+
+# The throwaway keyring vs your real one. gpg falls back to ~/.gnupg when
+# GNUPGHOME is unset, so the laptop side has to drop it, not set it to empty.
+gpg_work() { GNUPGHOME=$WORK/gnupg gpg "$@"; }
+gpg_home() { env -u GNUPGHOME gpg "$@"; }
+
+primary_fpr() {
+    gpg_work --with-colons --list-secret-keys | awk -F: '$1 == "fpr" { print $10; exit }'
+}
+
+setup_work() {
+    [ "$(id -u)" -ne 0 ] || die "run as yourself, not root"
+    command -v gpg >/dev/null || die "gpg not found"
+    WORK=$(mktemp -d /dev/shm/pgpkey.XXXXXX)
+    mkdir -m 700 "$WORK/gnupg" "$WORK/out"
+    # pinentry-curses needs to know which terminal to draw on.
+    if tty -s; then GPG_TTY=$(tty); export GPG_TTY; fi
+    IMPORTED=no
+    trap on_exit EXIT
+    trap 'exit 130' INT TERM
+}
+
+# On failure, a half-made key that never reached ~/.gnupg is worthless, so
+# wipe it. Once the laptop keyring has been touched, $WORK may hold the only
+# copy of the primary, so keep it.
+on_exit() {
+    status=$?
+    GNUPGHOME=$WORK/gnupg gpgconf --kill all 2>/dev/null || true
+    [ "$status" -ne 0 ] || return 0
+    if [ "$IMPORTED" = yes ]; then
+        echo "pgpkey: failed after importing into ~/.gnupg; kept $WORK, back it up before rebooting" >&2
+    else
+        rm -rf "$WORK"
+        echo "pgpkey: failed before touching ~/.gnupg (see the gpg error above); wiped $WORK, safe to re-run" >&2
+    fi
+}
+
+# Hold the output until it has been backed up, then delete it.
+offer_wipe() {
+    printf '\nCopy %s/out to your backups now (another terminal is fine).\n' "$WORK"
+    printf 'Type "wipe" when done; anything else leaves it in RAM until reboot: '
+    read -r answer || answer=
+    GNUPGHOME=$WORK/gnupg gpgconf --kill all 2>/dev/null || true
+    if [ "$answer" = wipe ]; then
+        rm -rf "$WORK"
+        echo "Wiped $WORK."
+    else
+        echo "Kept $WORK."
+    fi
+}
+
+# A short restore note that travels with the backup.
+write_readme() {
+    cat >"$WORK/out/README.txt" <<EOF
+OpenPGP identity backup, written $(date +%F)
+Fingerprint: $FPR
+
+primary.asc  FULL secret key (primary + subkeys). Passphrase-locked. The one that matters.
+subkeys.asc  Subkeys only, what a laptop keyring gets.
+public.asc   Public certificate, what you publish.
+revoke.asc   Revokes the whole key, no passphrase needed. To use it, delete the ':'
+             before -----BEGIN, then: gpg --import revoke.asc && re-publish.
+paperkey.txt Secret bits only, for printing. Restore with the public key:
+             paperkey --pubring public.asc --secrets paperkey.txt --output primary.gpg
+
+Restore a laptop:       gpg --import public.asc subkeys.asc
+Yearly extension:       pgpkey extend primary.asc
+EOF
+}
+
+generate() {
+    uid=${1:-$UID_DEFAULT}
+    command -v paperkey >/dev/null || die "paperkey not found: sudo dnf install paperkey"
+    setup_work
+
+    echo "Generating for: $uid (pinentry will ask for the new passphrase)"
+    gpg_work --quick-gen-key "$uid" ed25519 cert 3y
+    FPR=$(primary_fpr)
+    [ -n "$FPR" ] || die "could not read the new key's fingerprint"
+    gpg_work --quick-add-key "$FPR" ed25519 sign 2y
+    gpg_work --quick-add-key "$FPR" cv25519 encr 2y
+    gpg_work --quick-add-key "$FPR" ed25519 auth 2y
+
+    out=$WORK/out
+    echo "Exporting (pinentry asks the passphrase for each of the next 2 steps)"
+    gpg_work --armor --export-secret-keys "$FPR" >"$out/primary.asc"
+    gpg_work --armor --export-secret-subkeys "$FPR" >"$out/subkeys.asc"
+    gpg_work --armor --export "$FPR" >"$out/public.asc"
+    cp "$WORK/gnupg/openpgp-revocs.d/$FPR.rev" "$out/revoke.asc"
+    # From the file, not a third export: that would be one more prompt.
+    gpg_work --dearmor <"$out/primary.asc" | paperkey --output "$out/paperkey.txt"
+    write_readme
+
+    echo "Importing subkeys into ~/.gnupg (pinentry asks the passphrase once more)"
+    IMPORTED=yes
+    gpg_home --import "$out/public.asc" "$out/subkeys.asc"
+    echo "$FPR:6:" | gpg_home --import-ownertrust
+    # Field 15 of the sec record is "#" when only a stub of the primary is present.
+    stub=$(gpg_home --with-colons --list-secret-keys "$FPR" | awk -F: '$1 == "sec" { print $15 }')
+    [ "$stub" = "#" ] || die "the primary secret ended up in ~/.gnupg; investigate before going on"
+
+    gpg_home --list-secret-keys "$FPR"
+    cat <<EOF
+Fingerprint: $FPR
+Files in $out:
+$(ls -1 "$out" | sed 's/^/  /')
+
+Next:
+  1. Copy the folder to the LUKS USB stick(s).
+  2. Print paperkey.txt; store it away from the passphrase.
+  3. Bitwarden secure note: primary.asc + revoke.asc (web vault or bw, never rbw edit).
+  4. Publish public.asc: keys.openpgp.org, GitHub, fingerprint on your blog.
+  5. If you have older keys with the same email, add to ~/.gnupg/gpg.conf:  default-key $FPR
+EOF
+    offer_wipe
+}
+
+extend() {
+    [ $# -ge 1 ] || { usage >&2; exit 2; }
+    src=$1 period=${2:-2y}
+    [ -r "$src" ] || die "cannot read $src"
+    setup_work
+
+    echo "Importing the primary into a throwaway keyring (pinentry asks the passphrase)"
+    gpg_work --import "$src"
+    FPR=$(primary_fpr)
+    [ -n "$FPR" ] || die "no secret key in $src"
+    gpg_work --quick-set-expire "$FPR" "$period"
+    gpg_work --quick-set-expire "$FPR" "$period" '*'
+
+    out=$WORK/out
+    gpg_work --armor --export-secret-keys "$FPR" >"$out/primary.asc"
+    gpg_work --armor --export "$FPR" >"$out/public.asc"
+    gpg_work --dearmor <"$out/primary.asc" | paperkey --output "$out/paperkey.txt" 2>/dev/null \
+        || rm -f "$out/paperkey.txt"
+    # Only the public part goes home: it carries the new expiry for the existing subkeys.
+    IMPORTED=yes
+    gpg_home --import "$out/public.asc"
+
+    gpg_home --list-keys "$FPR"
+    cat <<EOF
+Expiry pushed to $period from today.
+Next:
+  1. Replace primary.asc (and paperkey.txt, if written) in every backup.
+  2. Re-publish public.asc: keys.openpgp.org and GitHub, or others still see the old expiry.
+EOF
+    offer_wipe
+}
+
+case ${1:-} in
+generate) shift; generate "$@" ;;
+extend) shift; extend "$@" ;;
+-h|--help|help) usage ;;
+*) usage >&2; exit 2 ;;
+esac
