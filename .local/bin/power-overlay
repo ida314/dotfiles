@@ -1,0 +1,32 @@
+#!/bin/sh
+# Toggle the battery/date overlay in the bottom-right corner of the screen.
+# Runs `power-feed | overlay` straight out of ~/.dotfiles/overlay, where `make`
+# builds the binary in place -- nothing is installed. Launching it while it is
+# already up stops it, so the one fuzzel entry both starts and stops it.
+# Stopping kills only overlay; power-feed dies of SIGPIPE on its next write.
+#
+# Usage: power-overlay [toggle|start|stop]
+set -eu
+
+dir=$HOME/.dotfiles/overlay
+
+running() { pgrep -x overlay >/dev/null; }
+
+start() {
+	if [ ! -x "$dir/overlay" ]; then
+		notify-send -a power-overlay "overlay is not built" "run make in $dir"
+		exit 1
+	fi
+	setsid -f sh -c '"$1/power-feed" | exec "$1/overlay" -p br \
+		-b "#00000000" -f "#dcdcdcd9" -o "#000000a0"' sh "$dir" \
+		</dev/null >/dev/null 2>&1
+}
+
+stop() { pkill -x overlay || true; }
+
+case ${1:-toggle} in
+toggle) if running; then stop; else start; fi ;;
+start) running || start ;;
+stop) stop ;;
+*) echo "usage: power-overlay [toggle|start|stop]" >&2; exit 2 ;;
+esac

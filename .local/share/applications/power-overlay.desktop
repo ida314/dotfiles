@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Power Overlay
+GenericName=Battery Overlay
+Comment=Toggle the battery, power draw and date overlay in the screen corner
+Exec=/home/dylan/.local/bin/power-overlay
+Icon=battery
+Terminal=false
+Categories=Utility;
+Keywords=overlay;battery;power;watts;charging;osd;
