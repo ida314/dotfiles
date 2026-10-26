@@ -25,6 +25,9 @@ SCRIPTS := powerctl powerctl-idle-action
 UNITS   := powerctl.service powerctl-resume.service \
            powerctl-refresh.service powerctl-refresh.timer
 ENABLE  := powerctl.service powerctl-resume.service powerctl-refresh.timer
+# powerctl-lid-awake is deliberately never enabled -- `powerctl lid toggle`
+# starts and stops it.
+USERUNITS := swayidle.service powerctl-lid-awake.service
 
 .DEFAULT_GOAL := help
 
@@ -56,7 +59,7 @@ check:
 	for f in $(SCRIPTS:%=$(SRCDIR)/bin/%); do \
 	  sh -n "$$f" && echo "ok    $${f##*/}" || { echo "FAIL  $${f##*/}"; rc=1; }; \
 	done; \
-	for u in $(UNITS:%=$(SRCDIR)/systemd/system/%) $(SRCDIR)/systemd/user/swayidle.service; do \
+	for u in $(UNITS:%=$(SRCDIR)/systemd/system/%) $(USERUNITS:%=$(SRCDIR)/systemd/user/%); do \
 	  systemd-analyze verify "$$u" 2>&1 | grep -v 'is not executable' | grep . && rc=1 || echo "ok    $${u##*/}"; \
 	done; \
 	exit $$rc
@@ -95,7 +98,7 @@ install-user:
 	fi
 	@# Symlinked, not copied: session files are yours to edit, and edits go
 	@# straight back into the dotfiles repo.
-	ln -sfn $(SRCDIR)/systemd/user/swayidle.service $(USERUNITDIR)/swayidle.service
+	for u in $(USERUNITS); do ln -sfn $(SRCDIR)/systemd/user/$$u $(USERUNITDIR)/$$u; done
 	systemctl --user daemon-reload
 
 enable:
@@ -149,8 +152,9 @@ uninstall-system:
 
 uninstall-user:
 	@echo '==> removing session files'
+	-systemctl --user stop powerctl-lid-awake.service
 	-systemctl --user disable --now swayidle.service
-	rm -f $(USERUNITDIR)/swayidle.service $(USERSTATEDIR)/swayidle-cmd.sh
+	rm -f $(USERUNITS:%=$(USERUNITDIR)/%) $(USERSTATEDIR)/swayidle-cmd.sh
 	-systemctl --user daemon-reload
 
 purge: uninstall

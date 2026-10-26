@@ -474,8 +474,101 @@ lid_word() {
     esac
 }
 
+# The bar toggle is a temporary override, not a policy. `lid off` cannot back a
+# waybar click: it rewrites /etc, so it needs sudo, which would hang with no tty.
+# A block inhibitor on handle-lid-switch makes logind skip the lid entirely.
+# Taking one is unprivileged (polkit allows it from the user's session), and it
+# lasts exactly as long as the process holding it. That process is a user
+# unit, so the unit's active state is the switch -- same idea as $UNIT for
+# charging. Nothing is written to disk, and the unit is never enabled, so the
+# hold ends at logout or reboot rather than surviving into a bag.
+LID_UNIT=powerctl-lid-awake.service
+LID_SIGNAL=13
+LID_CLOSED="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/powerctl-lid-closed"
+
+lid_held() { systemctl --user is-active --quiet "$LID_UNIT" 2>/dev/null; }
+
+# UPower already reads the lid switch and publishes it. The evdev node is
+# root-only, and logind's LidClosed property emits no change signal.
+lid_is_closed() { # -> true|false
+    busctl get-property org.freedesktop.UPower /org/freedesktop/UPower \
+           org.freedesktop.UPower LidIsClosed 2>/dev/null | awk '{print $2}'
+}
+
+lid_toggle() {
+    if lid_held; then
+        systemctl --user stop "$LID_UNIT" && _m="Lid close sleeps again"
+    else
+        systemctl --user start "$LID_UNIT" &&
+            _m="Lid close keeps running -- screen off and locked, no suspend"
+    fi
+    pkill -RTMIN+$LID_SIGNAL -x waybar 2>/dev/null || true
+    notify "${_m:-could not toggle $LID_UNIT}"
+}
+
+lid_status() {
+    _fmt=${1:-}
+    # The policy for the live power source -- what a click would override.
+    _pol=unknown
+    if _l=$(lid_live); then
+        # shellcheck disable=SC2086
+        set -- $_l
+        if on_ac; then _pol=$1; else _pol=$2; fi
+    fi
+    if [ "$_fmt" = --waybar ]; then
+        # Always rendered, unlike chargecap: this is a toggle, and a hidden
+        # module cannot be clicked on.
+        if lid_held; then
+            printf '{"text":"󰅶","tooltip":"Lid close: keeps running\\nScreen off and locked, no suspend\\nClick to let it sleep","class":"awake"}\n'
+        else
+            printf '{"text":"󰌢","tooltip":"Lid close: %s\\nClick to keep running with the lid closed","class":"sleeps"}\n' \
+                   "$(lid_word "$_pol")"
+        fi
+    elif lid_held; then
+        echo 'lid close: keeps running (held by the bar toggle)'
+    else
+        echo "lid close: $(lid_word "$_pol")"
+    fi
+}
+
+# Runs inside $LID_UNIT, under the systemd-inhibit that is the actual hold.
+# This half does what logind no longer does once it skips the lid: with no
+# suspend, nothing turns the panel off, and a shut laptop that stays awake
+# should not stay lit or unlocked. The marker file also tells
+# powerctl-idle-action to hold off idle sleep while the lid is shut.
+lid_watch() {
+    command -v gdbus >/dev/null || die "lid watch needs gdbus"
+    [ -n "$(lid_is_closed)" ] || die "UPower does not report a lid"
+    # Every UPower signal is only a cue to re-read the property, so the
+    # monitor's output format never has to be parsed. The leading echo is the
+    # initial read, for a lid that is already shut when the hold starts.
+    { echo; exec gdbus monitor --system --dest org.freedesktop.UPower \
+                               --object-path /org/freedesktop/UPower; } |
+    {
+        _was=false
+        while read -r _; do
+            _is=$(lid_is_closed)
+            [ -n "$_is" ] && [ "$_is" != "$_was" ] || continue
+            _was=$_is
+            if [ "$_is" = true ]; then
+                : > "$LID_CLOSED"
+                powerctl-idle-action blank || warn "lid closed: blank/lock failed"
+            else
+                rm -f "$LID_CLOSED"
+                # Never a bare wlopm --on: a lid opened right after closing it
+                # would wake apple-dcp mid power-down. wake holds it back.
+                powerctl-idle-action wake || warn "lid opened: wake failed"
+            fi
+        done
+    }
+    die "lost UPower's lid signal"
+}
+
 cmd_lid() {
     case ${1:-show} in
+    toggle) lid_toggle ;;
+    status) shift; lid_status "$@" ;;
+    watch)  lid_watch ;;
     show)
         if ! _l=$(lid_live); then
             printf 'lid close    unavailable (cannot reach logind)\n'
@@ -495,6 +588,11 @@ cmd_lid() {
             printf '\n  with an external display attached, lid close is ignored\n'
             printf '  regardless of the above (logind HandleLidSwitchDocked=%s)\n' \
                    "${_d:-ignore}"
+        fi
+
+        if lid_held; then
+            printf '\n  override: lid close keeps running, both sources (%s)\n' "$LID_UNIT"
+            printf '            turn it off from the bar or with: %s lid toggle\n' "$PROG"
         fi
         ;;
     *)
@@ -739,6 +837,11 @@ lid close                                                    [logind]
   lid                        show what closing the lid does, per source
   lid <on|off>                                       both power sources
   lid <ac|bat|both> <on|off>       on = suspend, off = stay awake  [sudo]
+  lid toggle                 temporary hold until toggled back (waybar
+                             on-click): lid close blanks and locks, never
+                             suspends, and idle sleep waits while it is shut.
+                             No sudo; ends at logout.
+  lid status [--waybar]      what lid close does right now
 
   Bypassed while an external display is attached -- logind treats that
   as docked and ignores the lid either way.

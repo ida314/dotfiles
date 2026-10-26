@@ -101,6 +101,23 @@ One thing to know before concluding it's broken: with an external display
 attached, logind treats the machine as docked and ignores the lid regardless of
 this setting.
 
+`lid off` makes logind ignore the lid and does nothing else. The panel stays
+lit under the closed lid, the session stays unlocked, and on battery the idle
+sleep still suspends ten minutes later, because a shut laptop gets no input.
+For "close it and let the job finish", use the bar toggle instead:
+
+```sh
+powerctl lid toggle                  # hold on/off (the waybar click)
+powerctl lid status [--waybar]       # what lid close does right now
+```
+
+While held, closing the lid turns the screen off and locks, opening it wakes the
+screen (through the same apple-dcp guard as `wake`), and nothing suspends, idle
+sleep included. It needs no sudo. The hold is a logind inhibitor owned by the
+user unit `powerctl-lid-awake.service`, so it ends at logout or reboot, and if
+it dies on its own you get a critical notification. It overrides both power
+sources and the configured `lid` rule.
+
 ### Where things live
 
 | | |
@@ -108,7 +125,8 @@ this setting.
 | charging rules | `/etc/powerctl/rules.conf` (root) |
 | idle rules | `~/.config/powerctl/idle.conf` (yours, no sudo) |
 | lid rule | `/etc/systemd/logind.conf.d/50-powerctl-lid.conf` (root, generated) |
-| what the bar shows | `powerctl status --waybar` |
+| lid hold (bar toggle) | `powerctl-lid-awake.service` (user unit, never enabled) |
+| what the bar shows | `powerctl status --waybar`, `powerctl lid status --waybar` |
 
 Only `cap`, `health`, `off`, `apply` and `lid <on|off>` need root; they re-exec
 under sudo themselves. Everything else — including all three *show* commands —

@@ -536,6 +536,44 @@ most likely reason for someone to conclude the setting is broken — so
 as restoring 100/100: a lid policy set by powerctl must not outlive the tool
 that explains why closing the lid does nothing.
 
+### The bar toggle is an inhibitor, not a policy
+
+`powerctl lid off` cannot be bound to a waybar click. It rewrites `/etc`, so it
+re-execs under sudo, and with no tty that waits forever for a password. A
+temporary "keep running with the lid shut" is also a different intent from a
+configured policy, in the same way `dwl-suspend-toggle` differs from `sleep
+never`.
+
+So `powerctl lid toggle` starts or stops the user unit
+`powerctl-lid-awake.service`, which runs
+`systemd-inhibit --what=handle-lid-switch --mode=block powerctl lid watch`.
+While a block inhibitor on `handle-lid-switch` exists, logind skips the lid
+entirely. polkit allows the inhibitor from the user's own session
+(`allow_active=yes`), and it does not need a seat: a process in
+`user@1000.service` gets it too. The unit's active state is the switch, as with
+`powerctl.service` for charging. It is never enabled, so the hold cannot
+survive into a bag after a reboot.
+
+Skipping the lid creates two jobs that suspend used to cover, and `lid watch`
+takes them on:
+
+- **Screen and lock.** Without suspend, nothing turns the panel off. The watcher
+  follows UPower's `LidIsClosed` (UPower already reads the switch; the evdev
+  node is root-only, and logind's `LidClosed` emits no change signal). On close
+  it runs `powerctl-idle-action blank`, the screen rule's own off+stamp+lock. On
+  open it runs `wake`, so a lid opened within 1.5s of closing cannot wedge
+  apple-dcp.
+- **Idle sleep.** A shut lid means no input, so on battery swayidle's sleep
+  timeout would suspend anyway and quietly undo the hold. While the lid is shut,
+  the watcher keeps `$XDG_RUNTIME_DIR/powerctl-lid-closed`, and
+  `powerctl-idle-action` treats it like the no-suspend flag. This is scoped to
+  *lid shut*. An open, idle laptop still sleeps as configured, so the two
+  toggles stay independent.
+
+The unit has no `Restart=`. If the hold ends other than by a stop, closing the
+lid suspends again. A critical notification says so, and the bar flips back
+through `ExecStopPost`.
+
 ## Worthwhile extensions
 
 Roughly in order of value:

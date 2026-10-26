@@ -1,0 +1,20 @@
+[Unit]
+Description=Keep running with the lid closed (powerctl lid toggle)
+Documentation=man:systemd-inhibit(1)
+
+# Started and stopped by `powerctl lid toggle` (the waybar click), never
+# enabled: a hold that survived a reboot would be found hot in a bag.
+#
+# The inhibitor is the hold itself -- logind skips the lid while it exists.
+# `lid watch` does what logind then no longer does: blank and lock on close,
+# wake on open.
+[Service]
+Type=simple
+ExecStart=systemd-inhibit --what=handle-lid-switch --mode=block --who=powerctl \
+          "--why=powerctl lid toggle: lid close keeps running" \
+          powerctl lid watch
+# Not Restart=: a hold that drops out must say so, not flap back quietly. If it
+# ends for any reason but a stop, closing the lid suspends again -- say so loudly.
+ExecStopPost=-rm -f %t/powerctl-lid-closed
+ExecStopPost=-sh -c '[ "$$SERVICE_RESULT" = success ] || notify-send -u critical powerctl "Lid hold ended ($$SERVICE_RESULT) -- closing the lid will suspend"'
+ExecStopPost=-pkill -RTMIN+13 -x waybar

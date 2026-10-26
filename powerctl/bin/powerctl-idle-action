@@ -1,6 +1,6 @@
 #!/bin/sh
 # swayidle handler, invoked as: powerctl-idle-action <screen|sleep> <timeout>
-#                           or: powerctl-idle-action wake
+#                           or: powerctl-idle-action <wake|blank>
 #
 # Every configured timeout is registered with swayidle, including ones that only
 # apply on the other power source. This handler no-ops unless the timeout that
@@ -14,7 +14,7 @@
 
 set -eu
 
-kind=${1:?usage: powerctl-idle-action <screen|sleep> <timeout> | wake}
+kind=${1:?usage: powerctl-idle-action <screen|sleep> <timeout> | wake | blank}
 
 # apple-dcp, the display coprocessor, wedges for good if the panel is powered
 # back on while it is still settling from a power-off: the power-on is
@@ -29,6 +29,22 @@ kind=${1:?usage: powerctl-idle-action <screen|sleep> <timeout> | wake}
 # the hold is capped at WAKE_GUARD regardless.
 BLANKED_AT="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/powerctl-blanked-at"
 WAKE_GUARD=1.5
+
+# Present while the lid is shut under `powerctl lid toggle` (written by
+# `powerctl lid watch`).
+LID_CLOSED="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/powerctl-lid-closed"
+
+# Panel off, then lock. The screen rule's action once it has decided to run,
+# and what closing the lid does while `powerctl lid toggle` holds it awake.
+blank() {
+    wlopm --off '*' 2>/dev/null || true
+    # After the off, so the guard counts from the panel going down. A failed
+    # stamp only costs the guard; it must never cost the lock.
+    cut -d' ' -f1 /proc/uptime > "$BLANKED_AT" || true
+    exec "$HOME/.local/bin/dwl-lock"
+}
+
+[ "$kind" = blank ] && blank
 
 if [ "$kind" = wake ]; then
     read -r now _ < /proc/uptime
@@ -91,7 +107,13 @@ esac
 
 # Temporary override from dwl-suspend-toggle. "Off until I say otherwise" is a
 # different intent from a configured "never", so it stays a separate knob.
-suspend_blocked() { [ -e "$HOME/.local/state/dwl/no-suspend" ]; }
+#
+# Also held off while the lid is shut under `powerctl lid toggle`: with the lid
+# closed nobody is there to give input, so the idle sleep would fire and do
+# exactly what the lid hold exists to prevent.
+suspend_blocked() {
+    [ -e "$HOME/.local/state/dwl/no-suspend" ] || [ -e "$LID_CLOSED" ]
+}
 
 case $kind in
 screen)
@@ -108,11 +130,7 @@ screen)
        ! suspend_blocked; then
         exit 0
     fi
-    wlopm --off '*' 2>/dev/null || true
-    # After the off, so the guard counts from the panel going down. A failed
-    # stamp only costs the guard; it must never cost the lock.
-    cut -d' ' -f1 /proc/uptime > "$BLANKED_AT" || true
-    exec "$HOME/.local/bin/dwl-lock"
+    blank
     ;;
 sleep)
     suspend_blocked && exit 0
