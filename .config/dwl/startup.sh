@@ -46,6 +46,11 @@ command -v nm-applet >/dev/null && nm-applet --indicator &
 # notifications
 command -v mako >/dev/null && mako &
 
+# voice dictation daemon; Fn toggles it through dwl's keybinding. Started here so
+# wtype inherits WAYLAND_DISPLAY. The model loads only while recording
+# (on_demand_loading in ~/.config/voxtype/config.toml), so it idles small.
+[ -x "$HOME/.local/bin/voxtype" ] && "$HOME/.local/bin/voxtype" daemon &
+
 # input method for Chinese + Japanese (ibus). The alphabetic layouts
 # (us/es/pt/fr/ru, Alt+Shift) are pure xkb in dwl's config.h and need nothing
 # here -- ibus is only for CJK, which needs a candidate popup.

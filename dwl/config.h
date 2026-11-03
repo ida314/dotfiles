@@ -236,6 +236,11 @@ static const Key keys[] = {
 	{ 0, XKB_KEY_XF86AudioNext,         spawn, SHCMD("playerctl next") },
 	{ 0, XKB_KEY_XF86AudioPrev,         spawn, SHCMD("playerctl previous") },
 
+	/* Voice dictation: tap Apple Fn. keyd turns the tap into F13 (XF86Tools), see
+	 * etc/keyd/default.conf. dwl bindings fire on press only, so this toggles
+	 * rather than holds. The daemon is started from startup.sh. */
+	{ 0, XKB_KEY_XF86Tools, spawn, SHCMD("$HOME/.local/bin/voxtype record toggle") },
+
 	/* Screenshots — macOS-style copy-to-clipboard (and save a file). Pops a mako
 	 * toast on capture. region = drag-select (Cmd+Shift+4), full = whole screen. */
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_s, spawn, SHCMD("$HOME/.local/bin/dwl-screenshot region") },
